@@ -9,6 +9,8 @@ add_executable(${PROJECT_NAME}
     src/main.cpp 
     src/glad.c
     src/Triangle.cpp
+    src/Shader.cpp
+    src/stb_image.cpp
 )
 
 # CMake complie glad.c 
