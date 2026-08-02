@@ -18,3 +18,8 @@ My first 2D Shape:
 Added 2D Texture 
 
 <img width="767" height="560" alt="image" src="https://github.com/user-attachments/assets/a571dfa6-5d0a-46ff-ad86-5e1f66451298" />
+
+Added projection Matrix and Light 
+
+<img width="2274" height="1878" alt="image" src="https://github.com/user-attachments/assets/0726d23c-4b00-4cf0-9af3-5a72fd76ed25" />
+
