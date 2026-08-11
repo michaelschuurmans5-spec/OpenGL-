@@ -55,42 +55,131 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
 }
 
 // Input functions
-void processInput(GLFWwindow* window) {
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+// Input functions
+void processInput(GLFWwindow* window, const glm::vec3* selectedTarget)
+{
+    // ---------------------------------------------------------
+    // ESCAPE - Close application
+    // ---------------------------------------------------------
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+    {
         glfwSetWindowShouldClose(window, true);
     }
 
+
+    // ---------------------------------------------------------
+    // F1 - Toggle/maximise window
+    // ---------------------------------------------------------
     static bool f1PressedLastFrame = false;
-    if (glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS) {
-        if (!f1PressedLastFrame) {
-            if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
+
+    if (glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS)
+    {
+        if (!f1PressedLastFrame)
+        {
+            if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED))
+            {
                 glfwRestoreWindow(window);
                 glfwSetWindowSize(window, 800, 600);
             }
-            else {
+            else
+            {
                 glfwMaximizeWindow(window);
             }
+
             f1PressedLastFrame = true;
         }
     }
-    else {
+    else
+    {
         f1PressedLastFrame = false;
     }
 
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) currentOperation = ImGuizmo::TRANSLATE;
-    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) currentOperation = ImGuizmo::ROTATE;
-    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) currentOperation = ImGuizmo::SCALE;
 
-    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
+    // ---------------------------------------------------------
+    // ImGuizmo operation shortcuts
+    // ---------------------------------------------------------
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        currentOperation = ImGuizmo::TRANSLATE;
+
+    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
+        currentOperation = ImGuizmo::ROTATE;
+
+    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS)
+        currentOperation = ImGuizmo::SCALE;
+
+
+    // ---------------------------------------------------------
+    // RIGHT MOUSE BUTTON - Normal camera movement
+    // ---------------------------------------------------------
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+    {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.ProcessKeyboard(1, deltaTime);
-        if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.ProcessKeyboard(2, deltaTime);
-        if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera.ProcessKeyboard(3, deltaTime);
-        if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.ProcessKeyboard(4, deltaTime);
+
+        // Move forward
+        if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        {
+            camera.ProcessKeyboard(1, deltaTime);
+        }
+
+        // Move backward
+        if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        {
+            camera.ProcessKeyboard(2, deltaTime);
+        }
+
+        // A/D - normal camera strafing
+        // Only when Left Mouse is NOT being held.
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS)
+        {
+            // Move left
+            if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+            {
+                camera.ProcessKeyboard(3, deltaTime);
+            }
+
+            // Move right
+            if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+            {
+                camera.ProcessKeyboard(4, deltaTime);
+            }
+        }
     }
-    else {
+    else
+    {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         firstMouse = true;
+    }
+
+
+    // ---------------------------------------------------------
+    // LEFT MOUSE + A/D - Orbit around selected object
+    // ---------------------------------------------------------
+    if (selectedTarget != nullptr &&
+        glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
+    {
+        const float orbitSpeed = glm::radians(90.0f);
+
+        // Orbit left
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        {
+            camera.OrbitAroundTarget(
+                *selectedTarget,
+                orbitSpeed * deltaTime
+            );
+        }
+
+        // Orbit right
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        {
+            camera.OrbitAroundTarget(
+                *selectedTarget,
+                -orbitSpeed * deltaTime
+            );
+        }
     }
 }
 
@@ -187,10 +276,19 @@ int main() {
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
-        processInput(window);
-
         auto& objects = myTriangle.GetSceneObjects();
 
+        glm::vec3* selectedTarget = nullptr;
+
+        if (selectedIndex >= 0 &&
+            selectedIndex < static_cast<int>(objects.size()))
+        {
+            selectedTarget = &objects[selectedIndex].position;
+        }
+
+        processInput(window, selectedTarget);
+
+     
         // --- INLINE HOTKEY 'F' FOCUS HANDLER ---
         static bool fPressedLastFrame = false;
         if (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS && !ImGui::GetIO().WantTextInput) {
@@ -255,43 +353,120 @@ int main() {
             }
         }
 
-        // 2. IMGUI MENU PANEL
-        if (showGUI) {
+       // 2. IMGUI MENU PANEL
+        if (showGUI)
+        {
             ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
 
-            ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoMove
+            ImGuiWindowFlags windowFlags =
+                ImGuiWindowFlags_NoMove
                 | ImGuiWindowFlags_NoResize
                 | ImGuiWindowFlags_AlwaysAutoResize
                 | ImGuiWindowFlags_NoTitleBar
                 | ImGuiWindowFlags_NoScrollbar;
 
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.1f, 0.85f));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+            ImGui::PushStyleColor(
+                ImGuiCol_WindowBg,
+                ImVec4(0.1f, 0.1f, 0.1f, 0.85f)
+            );
+
+            ImGui::PushStyleVar(
+                ImGuiStyleVar_WindowPadding,
+                ImVec2(8.0f, 6.0f)
+            );
 
             if (ImGui::Begin("##PersistentMenu", nullptr, windowFlags))
             {
-                if (ImGui::TreeNodeEx("MENU", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
+                // ---------------------------------------------------------
+                // ROOT MENU
+                // ---------------------------------------------------------
+                if (ImGui::TreeNodeEx(
+                    "MENU",
+                    ImGuiTreeNodeFlags_DefaultOpen |
+                    ImGuiTreeNodeFlags_SpanAvailWidth))
                 {
                     ImGui::Separator();
 
-                    if (ImGui::TreeNodeEx("Controls", ImGuiTreeNodeFlags_SpanAvailWidth))
+                    // =====================================================
+                    // CONTROLS
+                    // =====================================================
+                    if (ImGui::TreeNodeEx(
+                        "Controls",
+                        ImGuiTreeNodeFlags_SpanAvailWidth))
                     {
                         ImGui::Indent();
+
                         ImGui::TextDisabled("Viewport Controls Active:");
                         ImGui::BulletText("Left-Click an object to select.");
                         ImGui::BulletText("Press W: Translate | E: Rotate | R: Scale");
                         ImGui::BulletText("Hold Right-Click: Look around with mouse");
+                        ImGui::BulletText("Orbit: Hold Down left mouse A & D");
                         ImGui::BulletText("Scroll Wheel: Zoom Camera In & Out");
                         ImGui::BulletText("ESC: Exit Window | F1: Crop Window Layout");
+                        ImGui::BulletText("FOCUS: F");
+
                         ImGui::Unindent();
 
                         ImGui::TreePop();
                     }
 
+
+                    // =====================================================
+                    // OBJECTS
+                    // =====================================================
+                    if (ImGui::TreeNodeEx(
+                        "Objects",
+                        ImGuiTreeNodeFlags_SpanAvailWidth))
+                    {
+                        ImGui::Indent();
+
+                        // -------------------------------------------------
+                        // SHAPES
+                        // -------------------------------------------------
+                        if (ImGui::TreeNodeEx(
+                            "Shapes",
+                            ImGuiTreeNodeFlags_SpanAvailWidth))
+                        {
+                            ImGui::Indent();
+
+                            ImGui::BulletText("Cube");
+                            ImGui::BulletText("Sphere");
+                            ImGui::BulletText("Plane");
+                            ImGui::BulletText("Cylinder");
+
+                            ImGui::Unindent();
+                            ImGui::TreePop();
+                        }
+
+
+                        // -------------------------------------------------
+                        // MODELS
+                        // -------------------------------------------------
+                        if (ImGui::TreeNodeEx(
+                            "Models",
+                            ImGuiTreeNodeFlags_SpanAvailWidth))
+                        {
+                            ImGui::Indent();
+
+                            ImGui::BulletText("Load Model");
+                            ImGui::BulletText("Imported Models");
+
+                            ImGui::Unindent();
+                            ImGui::TreePop();
+                        }
+
+                        ImGui::Unindent();
+                        ImGui::TreePop();
+                    }
+
+
+                    // Close MENU
                     ImGui::TreePop();
                 }
+
                 ImGui::End();
             }
+
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
         }

@@ -3,6 +3,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>
 
 
 class Camera {
@@ -63,6 +64,7 @@ public:
 
     void ProcessMouseScroll(float yoffset) {
         Zoom -= (float)yoffset;
+
         if (Zoom < 1.0f)  Zoom = 1.0f;
         if (Zoom > 45.0f) Zoom = 45.0f;
     }
@@ -75,6 +77,31 @@ public:
         Front = glm::normalize(front);
         Right = glm::normalize(glm::cross(Front, WorldUp));
         Up = glm::normalize(glm::cross(Right, Front));
+    }
+
+    void OrbitAroundTarget(const glm::vec3& target, float angle)
+    {
+        glm::vec3 offset = Position - target;
+
+        float cosAngle = cos(angle);
+        float sinAngle = sin(angle);
+
+        float newX = offset.x * cosAngle - offset.z * sinAngle;
+        float newZ = offset.x * sinAngle + offset.z * cosAngle;
+
+        offset.x = newX;
+        offset.z = newZ;
+
+        Position = target + offset;
+
+        // Make camera look at selected object
+        Front = glm::normalize(target - Position);
+
+        // Synchronise Yaw and Pitch
+        Yaw = glm::degrees(atan2(Front.z, Front.x));
+        Pitch = glm::degrees(asin(Front.y));
+
+        updateCameraVectors();
     }
 
 private:
