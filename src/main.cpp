@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <cstdio>
 
 // Window size constraints
 unsigned int SCR_WIDTH = 800;
@@ -38,6 +39,14 @@ struct PendingShapeConfig {
 static PendingShapeConfig g_pendingShape;
 static int g_expandedShapeIndex = -1; // which shape's properties panel is open, -1 = none
 static bool g_isDraggingShape = false; // true while a shape item is being dragged toward the viewport
+
+// ---------------------------------------------------------
+// Viewport Manager (right-hand outliner) state
+// ---------------------------------------------------------
+static bool g_outlinerOpen = true;      // arrow drop-down: collapse/expand the panel
+static int  g_renamingIndex = -1;       // index of the object currently being renamed
+static char g_renameBuffer[64] = "";    // scratch buffer for the rename input
+static bool g_focusRequest = false;     // set by the outliner "Focus" button (same as pressing F)
 
 static void SetBuffer(char* buf, size_t bufSize, const std::string& value) {
     strncpy(buf, value.c_str(), bufSize - 1);
@@ -66,6 +75,27 @@ bool firstMouse = true;
 bool showGUI = true;
 int selectedIndex = -1;
 ImGuizmo::OPERATION currentOperation = ImGuizmo::TRANSLATE;
+
+// --- Helper: frame the camera on a world position (shared by the F hotkey
+// and the Viewport Manager's focus button) ---
+void FocusCameraOnPoint(const glm::vec3& targetPos) {
+    camera.Position = targetPos + glm::vec3(0.0f, 0.0f, 4.0f);
+
+    glm::vec3 direction = glm::normalize(targetPos - camera.Position);
+    camera.Pitch = glm::degrees(asin(direction.y));
+    camera.Yaw = glm::degrees(atan2(direction.z, direction.x));
+    camera.updateCameraVectors();
+}
+
+// --- Helper: index of the object that currently holds the selection lock,
+// or -1 when nothing is locked. While an object is locked it is the only
+// object that can be picked or manipulated in the viewport. ---
+int FindLockedIndex(const std::vector<GameObject>& objects) {
+    for (int i = 0; i < (int)objects.size(); i++) {
+        if (objects[i].locked) return i;
+    }
+    return -1;
+}
 
 // --- Helper: Basic Ray-Bounding Box Intersection ---
 bool RayIntersectsObject(const glm::vec3& rayOrigin, const glm::vec3& rayDirection, const glm::vec3& objPos, float radius = 0.5f) {
@@ -350,32 +380,28 @@ int main() {
 
 
         // --- INLINE HOTKEY 'F' FOCUS HANDLER ---
+        // A locked object owns the selection: force it and ignore everything else.
+        int lockedIndex = FindLockedIndex(objects);
+        if (lockedIndex >= 0) {
+            selectedIndex = lockedIndex;
+        }
+
         static bool fPressedLastFrame = false;
-        if (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS && !ImGui::GetIO().WantTextInput) {
-            if (!fPressedLastFrame) {
-                if (selectedIndex < 0 || selectedIndex >= (int)objects.size()) {
-                    camera.Position = glm::vec3(0.0f, 0.0f, 3.0f);
-                    camera.Yaw = -90.0f;
-                    camera.Pitch = 0.0f;
-                    camera.updateCameraVectors();
-                }
-                else {
-                    auto& selectedObj = objects[selectedIndex];
-                    glm::vec3 targetPos = selectedObj.position;
+        bool fKeyDown = (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS) && !ImGui::GetIO().WantTextInput;
 
-                    camera.Position = targetPos + glm::vec3(0.0f, 0.0f, 4.0f);
-
-                    glm::vec3 direction = glm::normalize(targetPos - camera.Position);
-                    camera.Pitch = glm::degrees(asin(direction.y));
-                    camera.Yaw = glm::degrees(atan2(direction.z, direction.x));
-                    camera.updateCameraVectors();
-                }
-                fPressedLastFrame = true;
+        if ((fKeyDown && !fPressedLastFrame) || g_focusRequest) {
+            if (selectedIndex < 0 || selectedIndex >= (int)objects.size()) {
+                camera.Position = glm::vec3(0.0f, 0.0f, 3.0f);
+                camera.Yaw = -90.0f;
+                camera.Pitch = 0.0f;
+                camera.updateCameraVectors();
             }
+            else {
+                FocusCameraOnPoint(objects[selectedIndex].position);
+            }
+            g_focusRequest = false;
         }
-        else {
-            fPressedLastFrame = false;
-        }
+        fPressedLastFrame = fKeyDown;
 
         // --- Start ImGui frame ---
         ImGui_ImplOpenGL3_NewFrame();
@@ -406,6 +432,11 @@ int main() {
             glm::vec3 rayWorld = glm::normalize(glm::vec3(invView * rayEye));
 
             for (int i = 0; i < (int)objects.size(); i++) {
+                // Locked: only the locked object may be picked.
+                if (lockedIndex >= 0 && i != lockedIndex) continue;
+                // Hidden objects are not pickable.
+                if (!objects[i].visible) continue;
+
                 if (RayIntersectsObject(camera.Position, rayWorld, objects[i].position)) {
                     selectedIndex = i;
                     break;
@@ -657,8 +688,172 @@ int main() {
             ImGui::PopStyleColor();
         }
 
+
+        // 2b. VIEWPORT MANAGER (right-hand outliner)
+        // Lists every object living in the viewport with its unique ID, an
+        // editable name, a visibility (eye) toggle and a selection lock.
+        {
+            const float panelWidth = 340.0f;
+            ImGui::SetNextWindowPos(ImVec2((float)SCR_WIDTH - panelWidth, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(
+                ImVec2(panelWidth, g_outlinerOpen ? (float)SCR_HEIGHT : 0.0f),
+                ImGuiCond_Always);
+
+            ImGuiWindowFlags outlinerFlags =
+                ImGuiWindowFlags_NoMove
+                | ImGuiWindowFlags_NoResize
+                | ImGuiWindowFlags_NoTitleBar
+                | ImGuiWindowFlags_NoCollapse;
+
+            if (!g_outlinerOpen)
+                outlinerFlags |= ImGuiWindowFlags_AlwaysAutoResize;
+
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.09f, 0.92f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+
+            if (ImGui::Begin("##ViewportManager", nullptr, outlinerFlags))
+            {
+                // ---- Header with the arrow drop-down ----
+                if (ImGui::ArrowButton("##OutlinerToggle", g_outlinerOpen ? ImGuiDir_Right : ImGuiDir_Down))
+                    g_outlinerOpen = !g_outlinerOpen;
+
+                ImGui::SameLine();
+                ImGui::Text("Viewport Manager");
+
+                if (g_outlinerOpen)
+                {
+                    ImGui::Separator();
+
+                    int lockedNow = FindLockedIndex(objects);
+                    if (lockedNow >= 0) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+                            "LOCKED: %s (only this object is selectable)",
+                            objects[lockedNow].name.c_str());
+                        ImGui::Separator();
+                    }
+
+                    ImGui::TextDisabled("Select an item, then press F to focus it.");
+                    ImGui::Spacing();
+
+                    ImGui::BeginChild("##OutlinerList", ImVec2(0.0f, 0.0f), false);
+
+                    for (int i = 0; i < (int)objects.size(); i++)
+                    {
+                        GameObject& obj = objects[i];
+                        ImGui::PushID(obj.id);
+
+                        bool interactable = (lockedNow < 0) || (i == lockedNow);
+
+                        // ---- Eye icon: hide / unhide ----
+                        if (ImGui::SmallButton(obj.visible ? "O" : "-")) {
+                            obj.visible = !obj.visible;
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(obj.visible ? "Visible (click to hide)" : "Hidden (click to show)");
+
+                        // ---- Lock icon: restrict selection to this object ----
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton(obj.locked ? "[L]" : "[ ]")) {
+                            if (obj.locked) {
+                                obj.locked = false;
+                            }
+                            else {
+                                for (auto& other : objects) other.locked = false; // only one lock at a time
+                                obj.locked = true;
+                                selectedIndex = i;
+                            }
+                            lockedNow = FindLockedIndex(objects);
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(obj.locked
+                                ? "Selection locked to this object (click to unlock)"
+                                : "Lock selection to this object");
+
+                        ImGui::SameLine();
+
+                        // ---- Name row (double-click or the Rename button to edit) ----
+                        if (g_renamingIndex == i)
+                        {
+                            ImGui::SetNextItemWidth(180.0f);
+                            if (ImGui::InputText("##RenameField", g_renameBuffer, IM_ARRAYSIZE(g_renameBuffer),
+                                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+                            {
+                                if (g_renameBuffer[0] != '\0')
+                                    obj.name = g_renameBuffer;
+                                g_renamingIndex = -1;
+                            }
+
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("OK")) {
+                                if (g_renameBuffer[0] != '\0')
+                                    obj.name = g_renameBuffer;
+                                g_renamingIndex = -1;
+                            }
+                        }
+                        else
+                        {
+                            char label[128];
+                            snprintf(label, sizeof(label), "#%d  %s  (%s)",
+                                obj.id, obj.name.c_str(), ToString(obj.type).c_str());
+
+                            bool isSelected = (selectedIndex == i);
+
+                            if (!interactable)
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
+                            else if (!obj.visible)
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+
+                            if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_AllowDoubleClick))
+                            {
+                                if (interactable) {
+                                    selectedIndex = i;
+                                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                                        g_renamingIndex = i;
+                                        SetBuffer(g_renameBuffer, sizeof(g_renameBuffer), obj.name);
+                                    }
+                                }
+                            }
+
+                            if (!interactable || !obj.visible)
+                                ImGui::PopStyleColor();
+                        }
+
+                        // ---- Per-item actions for the selected row ----
+                        if (selectedIndex == i && g_renamingIndex != i)
+                        {
+                            ImGui::Indent();
+                            if (ImGui::SmallButton("Focus (F)")) {
+                                g_focusRequest = true;
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Rename")) {
+                                g_renamingIndex = i;
+                                SetBuffer(g_renameBuffer, sizeof(g_renameBuffer), obj.name);
+                            }
+                            ImGui::TextDisabled("pos  %.2f, %.2f, %.2f",
+                                obj.position.x, obj.position.y, obj.position.z);
+                            ImGui::Unindent();
+                        }
+
+                        ImGui::PopID();
+                    }
+
+                    if (objects.empty())
+                        ImGui::TextDisabled("No objects in the viewport yet.");
+
+                    ImGui::EndChild();
+                }
+            }
+            ImGui::End();
+
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        }
+
         // 3. OVERLAY DIRECT VIEWPORT MANIPULATION GIZMO
-        if (selectedIndex >= 0 && selectedIndex < (int)objects.size()) {
+        if (selectedIndex >= 0 && selectedIndex < (int)objects.size() &&
+            objects[selectedIndex].visible &&
+            (lockedIndex < 0 || selectedIndex == lockedIndex)) {
             auto& obj = objects[selectedIndex];
 
             int currentWidth, currentHeight;

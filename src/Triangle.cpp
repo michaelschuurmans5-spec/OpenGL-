@@ -300,12 +300,24 @@ Triangle::Triangle() {
 	glGenBuffers(1, &EBO);
 
 	// REPLACED OLD LINES HERE: Initialize GameObjects using the new structural alignment
-	GameObject cube = { ObjectType::Cube, glm::vec3(0.0f, 0.5f, 0.0f), glm::vec3(1.0f), "Cube_0", false, glm::vec3(0.0f) };
+	GameObject cube{};
+	cube.type = ObjectType::Cube;
+	cube.position = glm::vec3(0.0f, 0.5f, 0.0f);
+	cube.scale = glm::vec3(1.0f);
+	cube.name = "Cube_0";
+	cube.rotates = false;
+	cube.rotation = glm::vec3(0.0f);
 	cube.transformMatrix = glm::translate(glm::mat4(1.0f), cube.position);
 	cube.textureSlot = TextureSlot::Container;
 	sceneObjects.push_back(cube);
 
-	GameObject ground = { ObjectType::Ground, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f), "Ground", false, glm::vec3(0.0f) };
+	GameObject ground{};
+	ground.type = ObjectType::Ground;
+	ground.position = glm::vec3(0.0f, 0.0f, 0.0f);
+	ground.scale = glm::vec3(1.0f);
+	ground.name = "Ground";
+	ground.rotates = false;
+	ground.rotation = glm::vec3(0.0f);
 	ground.transformMatrix = glm::translate(glm::mat4(1.0f), ground.position);
 	sceneObjects.push_back(ground);
 
@@ -433,7 +445,13 @@ void Triangle::SpawnCube(const glm::vec3& spawnPosition) {
 	std::string name = "Cube_" + std::to_string(nextCubeID);
 	nextCubeID++;
 
-	GameObject cube = { ObjectType::Cube, spawnPosition, glm::vec3(1.0f), name, false, glm::vec3(0.0f) };
+	GameObject cube{};
+	cube.type = ObjectType::Cube;
+	cube.position = spawnPosition;
+	cube.scale = glm::vec3(1.0f);
+	cube.name = name;
+	cube.rotates = false;
+	cube.rotation = glm::vec3(0.0f);
 	cube.transformMatrix = glm::translate(glm::mat4(1.0f), spawnPosition); // FIXED: Passing 2 parameters explicitly
 	cube.textureSlot = TextureSlot::Container;
 	sceneObjects.push_back(cube);
@@ -470,7 +488,13 @@ void Triangle::SpawnLight(const glm::vec3& spawnPosition) {
 	std::string name = "Light_" + std::to_string(nextLightID);
 	nextLightID++;
 
-	GameObject light = { ObjectType::Light, spawnPosition, glm::vec3(1.0f), name, false, glm::vec3(0.0f) };
+	GameObject light{};
+	light.type = ObjectType::Light;
+	light.position = spawnPosition;
+	light.scale = glm::vec3(1.0f);
+	light.name = name;
+	light.rotates = false;
+	light.rotation = glm::vec3(0.0f);
 	light.transformMatrix = glm::translate(glm::mat4(1.0f), spawnPosition); // FIXED: Passing 2 parameters explicitly
 	sceneObjects.push_back(light);
 }
@@ -513,6 +537,7 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 	std::vector<glm::vec3> activeLightPositions;
 
 	for (const auto& obj : sceneObjects) {
+		if (!obj.visible) continue; // hidden via the Viewport Manager eye icon
 		if (obj.type == ObjectType::Light) {
 			activeLightPositions.push_back(obj.position);
 			if (activeLightPositions.size() >= MAX_LIGHTS) break;
@@ -553,6 +578,7 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 	int objectColorLoc = glGetUniformLocation(myShader->ID, "objectColor");
 
 	for (const auto& obj : sceneObjects) {
+		if (!obj.visible) continue; // hidden via the Viewport Manager eye icon
 		if (obj.type == ObjectType::Light) continue;
 
 		// Bind the pure, uncorrupted matrix updated natively by ImGuizmo
@@ -623,6 +649,7 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 
 	if (hasLightEntity) {
 		for (const auto& obj : sceneObjects) {
+			if (!obj.visible) continue; // hidden via the Viewport Manager eye icon
 			if (obj.type != ObjectType::Light) continue;
 
 			// Extract the light matrix managed dynamically inside your viewport space
