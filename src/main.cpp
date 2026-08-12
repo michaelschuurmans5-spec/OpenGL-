@@ -18,10 +18,39 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <cstring>
 
 // Window size constraints
 unsigned int SCR_WIDTH = 800;
 unsigned int SCR_HEIGHT = 600;
+
+// ---------------------------------------------------------
+// Objects > Shapes drag-and-drop / properties panel state
+// (Left untouched: Objects > Models is reserved for imported meshes.)
+// ---------------------------------------------------------
+struct PendingShapeConfig {
+    ObjectType type = ObjectType::Cube;
+    char nameBuffer[64] = "Cube";
+    glm::vec3 baseColor = glm::vec3(1.0f, 0.5f, 0.31f);
+    int textureSlotIndex = 0; // 0=None, 1=Container, 2=Grass
+};
+
+static PendingShapeConfig g_pendingShape;
+static int g_expandedShapeIndex = -1; // which shape's properties panel is open, -1 = none
+static bool g_isDraggingShape = false; // true while a shape item is being dragged toward the viewport
+
+static void SetBuffer(char* buf, size_t bufSize, const std::string& value) {
+    strncpy(buf, value.c_str(), bufSize - 1);
+    buf[bufSize - 1] = '\0';
+}
+
+static TextureSlot ToTextureSlot(int index) {
+    switch (index) {
+    case 1: return TextureSlot::Container;
+    case 2: return TextureSlot::Grass;
+    default: return TextureSlot::None;
+    }
+}
 
 // Camera Variables 
 Camera camera(glm::vec3(0.0f, 1.0f, 2.0f));
@@ -46,6 +75,37 @@ bool RayIntersectsObject(const glm::vec3& rayOrigin, const glm::vec3& rayDirecti
     if (b > 0.0f && c > 0.0f) return false;
     float discriminant = b * b - c;
     return discriminant >= 0.0f;
+}
+
+// Casts a ray from the camera through a screen-space point and intersects it
+// with the y = 0 ground plane, so a shape dropped into the viewport lands
+// roughly where the cursor is pointing. Falls back to a spot in front of the
+// camera if the ray never reaches the ground (e.g. looking straight up).
+glm::vec3 ScreenPosToGroundPoint(double mouseX, double mouseY, const Camera& cam,
+    const glm::mat4& view, const glm::mat4& projection, unsigned int screenWidth, unsigned int screenHeight) {
+
+    float x = (2.0f * (float)mouseX) / screenWidth - 1.0f;
+    float y = 1.0f - (2.0f * (float)mouseY) / screenHeight;
+
+    glm::mat4 invProj = glm::inverse(projection);
+    glm::mat4 invView = glm::inverse(view);
+
+    glm::vec4 rayClip(x, y, -1.0f, 1.0f);
+    glm::vec4 rayEye = invProj * rayClip;
+    rayEye = glm::vec4(rayEye.x, rayEye.y, -1.0f, 0.0f);
+    glm::vec3 rayWorld = glm::normalize(glm::vec3(invView * rayEye));
+
+    glm::vec3 rayOrigin = cam.Position;
+
+    if (fabs(rayWorld.y) > 0.0001f) {
+        float t = -rayOrigin.y / rayWorld.y;
+        if (t > 0.0f) {
+            return rayOrigin + rayWorld * t;
+        }
+    }
+
+    // Fallback: drop it a fixed distance in front of the camera
+    return rayOrigin + cam.Front * 3.0f;
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
@@ -161,7 +221,7 @@ void processInput(GLFWwindow* window, const glm::vec3* selectedTarget)
     if (selectedTarget != nullptr &&
         glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
     {
-        const float orbitSpeed = glm::radians(90.0f);
+        constexpr float orbitSpeed = glm::radians(90.0f);
 
         // Orbit left
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
@@ -288,7 +348,7 @@ int main() {
 
         processInput(window, selectedTarget);
 
-     
+
         // --- INLINE HOTKEY 'F' FOCUS HANDLER ---
         static bool fPressedLastFrame = false;
         if (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS && !ImGui::GetIO().WantTextInput) {
@@ -353,7 +413,50 @@ int main() {
             }
         }
 
-       // 2. IMGUI MENU PANEL
+        // 1b. VIEWPORT DRAG-DROP TARGET (drop a shape from Objects > Shapes here)
+        // Only exists while an actual drag is in progress - otherwise this
+        // full-screen window would sit over the whole viewport every frame
+        // and steal the clicks that selection/gizmo/orbit rely on.
+        if (g_isDraggingShape)
+        {
+            ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2((float)SCR_WIDTH, (float)SCR_HEIGHT), ImGuiCond_Always);
+
+            ImGuiWindowFlags dropZoneFlags =
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                ImGuiWindowFlags_NoDecoration;
+
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+            if (ImGui::Begin("##ViewportDropZone", nullptr, dropZoneFlags)) {
+                ImGui::InvisibleButton("##ViewportDropZoneArea", ImGui::GetWindowSize());
+
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SHAPE_TYPE")) {
+                        ObjectType droppedType = *(const ObjectType*)payload->Data;
+                        ImVec2 dropMousePos = ImGui::GetIO().MousePos;
+
+                        glm::vec3 dropPos = ScreenPosToGroundPoint(
+                            dropMousePos.x, dropMousePos.y,
+                            camera, view, projection, SCR_WIDTH, SCR_HEIGHT);
+
+                        myTriangle.SpawnShape(
+                            droppedType,
+                            dropPos,
+                            "", // auto-named
+                            glm::vec3(1.0f, 0.5f, 0.31f),
+                            TextureSlot::None);
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
+
+        // 2. IMGUI MENU PANEL
+        g_isDraggingShape = false; // re-armed below only while a shape item is actively being dragged
         if (showGUI)
         {
             ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
@@ -429,10 +532,93 @@ int main() {
                         {
                             ImGui::Indent();
 
-                            ImGui::BulletText("Cube");
-                            ImGui::BulletText("Sphere");
-                            ImGui::BulletText("Plane");
-                            ImGui::BulletText("Cylinder");
+                            static const char* shapeNames[] = { "Cube", "Sphere", "Plane", "Cylinder", "Prism" };
+                            static const ObjectType shapeTypes[] = {
+                                ObjectType::Cube, ObjectType::Sphere, ObjectType::Plane,
+                                ObjectType::Cylinder, ObjectType::Prism
+                            };
+                            const int shapeCount = IM_ARRAYSIZE(shapeNames);
+
+                            bool draggingShapeThisFrame = false;
+
+                            for (int i = 0; i < shapeCount; i++)
+                            {
+                                ImGui::PushID(i);
+
+                                bool isOpen = (g_expandedShapeIndex == i);
+                                if (ImGui::Selectable(shapeNames[i], isOpen))
+                                {
+                                    if (isOpen)
+                                    {
+                                        g_expandedShapeIndex = -1;
+                                    }
+                                    else
+                                    {
+                                        g_expandedShapeIndex = i;
+                                        g_pendingShape.type = shapeTypes[i];
+                                        SetBuffer(g_pendingShape.nameBuffer, sizeof(g_pendingShape.nameBuffer), shapeNames[i]);
+                                        g_pendingShape.baseColor = glm::vec3(1.0f, 0.5f, 0.31f);
+                                        g_pendingShape.textureSlotIndex = 0;
+                                    }
+                                }
+
+                                // DRAG SOURCE: lets you drag this shape straight into the viewport
+                                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                                {
+                                    draggingShapeThisFrame = true;
+                                    ImGui::SetDragDropPayload("SHAPE_TYPE", &shapeTypes[i], sizeof(ObjectType));
+                                    ImGui::Text("Place %s", shapeNames[i]);
+                                    ImGui::EndDragDropSource();
+                                }
+
+                                // DETAILS DROPDOWN: name, mesh type, base color, texture slot, Create
+                                if (g_expandedShapeIndex == i)
+                                {
+                                    ImGui::Indent();
+                                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.2f));
+                                    ImGui::BeginChild(
+                                        "##ShapeDetails",
+                                        ImVec2(320.0f, 220.0f),
+                                        true,
+                                        ImGuiWindowFlags_HorizontalScrollbar);
+
+                                    ImGui::TextDisabled("Mesh Type: Basic Shape (%s)", shapeNames[i]);
+                                    ImGui::Spacing();
+
+                                    ImGui::SetNextItemWidth(160.0f);
+                                    ImGui::InputText("Name", g_pendingShape.nameBuffer, IM_ARRAYSIZE(g_pendingShape.nameBuffer));
+
+                                    ImGui::ColorEdit3("Base Color", &g_pendingShape.baseColor.x);
+
+                                    const char* textureOptions[] = { "None", "Container", "Grass" };
+                                    ImGui::SetNextItemWidth(160.0f);
+                                    ImGui::Combo("Texture Slot", &g_pendingShape.textureSlotIndex, textureOptions, IM_ARRAYSIZE(textureOptions));
+
+                                    ImGui::Spacing();
+                                    // More configuration options (roughness, material presets, etc.) can be added here later.
+
+                                    if (ImGui::Button("Create", ImVec2(120.0f, 0.0f)))
+                                    {
+                                        glm::vec3 spawnPos = camera.Position + camera.Front * 3.0f;
+                                        std::string spawnName = g_pendingShape.nameBuffer;
+
+                                        myTriangle.SpawnShape(
+                                            g_pendingShape.type,
+                                            spawnPos,
+                                            spawnName,
+                                            g_pendingShape.baseColor,
+                                            ToTextureSlot(g_pendingShape.textureSlotIndex));
+                                    }
+
+                                    ImGui::EndChild();
+                                    ImGui::PopStyleColor();
+                                    ImGui::Unindent();
+                                }
+
+                                ImGui::PopID();
+                            }
+
+                            g_isDraggingShape = draggingShapeThisFrame;
 
                             ImGui::Unindent();
                             ImGui::TreePop();
