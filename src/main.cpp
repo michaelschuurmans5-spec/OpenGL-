@@ -47,6 +47,8 @@ static bool g_outlinerOpen = true;      // arrow drop-down: collapse/expand the 
 static int  g_renamingIndex = -1;       // index of the object currently being renamed
 static char g_renameBuffer[64] = "";    // scratch buffer for the rename input
 static bool g_focusRequest = false;     // set by the outliner "Focus" button (same as pressing F)
+static int  g_pendingDeleteId = -1;  // Delete
+static bool g_openDeletePopup = false;
 
 static void SetBuffer(char* buf, size_t bufSize, const std::string& value) {
     strncpy(buf, value.c_str(), bufSize - 1);
@@ -403,6 +405,18 @@ int main() {
         }
         fPressedLastFrame = fKeyDown;
 
+        // --- INLINE HOTKEY 'X' DELETE HANDLER ---
+        static bool xPressedLastFrame = false;
+        bool xKeyDown = (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS) && !ImGui::GetIO().WantTextInput;
+        if (xKeyDown && !xPressedLastFrame &&
+            selectedIndex >= 0 && selectedIndex < (int)objects.size())
+        {
+            g_pendingDeleteId = objects[selectedIndex].id;
+            g_openDeletePopup = true;
+        }
+        xPressedLastFrame = xKeyDown;
+
+
         // --- Start ImGui frame ---
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -684,6 +698,38 @@ int main() {
                 ImGui::End();
             }
 
+            if (g_openDeletePopup) { ImGui::OpenPopup("Delete Object?"); g_openDeletePopup = false; }
+
+            if (ImGui::BeginPopupModal("Delete Object?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                int deleteIdx = -1;
+                for (int i = 0; i < (int)objects.size(); i++)
+                    if (objects[i].id == g_pendingDeleteId) { deleteIdx = i; break; }
+
+                if (deleteIdx < 0) { g_pendingDeleteId = -1; ImGui::CloseCurrentPopup(); }
+                else {
+                    ImGui::Text("Are you sure you want to delete \"%s\" (#%d)?",
+                        objects[deleteIdx].name.c_str(), objects[deleteIdx].id);
+                    ImGui::Spacing();
+                    if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
+                        objects.erase(objects.begin() + deleteIdx);
+                        if (selectedIndex == deleteIdx)      selectedIndex = -1;
+                        else if (selectedIndex > deleteIdx)  selectedIndex--;
+                        if (g_renamingIndex == deleteIdx)      g_renamingIndex = -1;
+                        else if (g_renamingIndex > deleteIdx)  g_renamingIndex--;
+                        lockedIndex = FindLockedIndex(objects);
+                        g_pendingDeleteId = -1;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
+                        g_pendingDeleteId = -1; ImGui::CloseCurrentPopup();
+                    }
+                }
+                ImGui::EndPopup();
+            }
+
+
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
         }
@@ -770,6 +816,10 @@ int main() {
                                 : "Lock selection to this object");
 
                         ImGui::SameLine();
+                        if (ImGui::SmallButton("Delete (X)")) {
+                            g_pendingDeleteId = obj.id;
+                            g_openDeletePopup = true;
+                        }
 
                         // ---- Name row (double-click or the Rename button to edit) ----
                         if (g_renamingIndex == i)
