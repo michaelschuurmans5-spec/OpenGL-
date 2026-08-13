@@ -482,28 +482,6 @@ Triangle::Triangle() {
 	glGenBuffers(1, &VBO);
 	glGenBuffers(1, &EBO);
 
-	// REPLACED OLD LINES HERE: Initialize GameObjects using the new structural alignment
-	GameObject cube{};
-	cube.type = ObjectType::Cube;
-	cube.position = glm::vec3(0.0f, 0.5f, 0.0f);
-	cube.scale = glm::vec3(1.0f);
-	cube.name = "Cube_0";
-	cube.rotates = false;
-	cube.rotation = glm::vec3(0.0f);
-	cube.transformMatrix = glm::translate(glm::mat4(1.0f), cube.position);
-	cube.textureSlot = TextureSlot::Container;
-	sceneObjects.push_back(cube);
-
-	GameObject ground{};
-	ground.type = ObjectType::Ground;
-	ground.position = glm::vec3(0.0f, 0.0f, 0.0f);
-	ground.scale = glm::vec3(1.0f);
-	ground.name = "Ground";
-	ground.rotates = false;
-	ground.rotation = glm::vec3(0.0f);
-	ground.transformMatrix = glm::translate(glm::mat4(1.0f), ground.position);
-	sceneObjects.push_back(ground);
-
 	// Stride for the cube: 8 floats
 	GLsizei stride = 8 * sizeof(float);
 
@@ -593,20 +571,8 @@ Triangle::Triangle() {
 	}
 	stbi_image_free(data);
 
-	// Configure Ground Buffer Data structures
-	glBindVertexArray(groundVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, groundVBO);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(groundVertices), groundVertices, GL_STATIC_DRAW);
-
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, groundEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(groundIndices), groundIndices, GL_STATIC_DRAW);
-
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, groundStride, (void*)0);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, groundStride, (void*)(3 * sizeof(float)));
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, groundStride, (void*)(6 * sizeof(float)));
-	glEnableVertexAttribArray(2);
+	
+	
 
 	// Unbind everything safely
 	glBindVertexArray(0);
@@ -623,7 +589,7 @@ Triangle::Triangle() {
 	glBindVertexArray(0);
 }
 
-// FIXED: Parameter naming fixed to match standard spelling rules + added matrix baking
+// Parameter naming fixed to match standard spelling rules + added matrix baking
 void Triangle::SpawnCube(const glm::vec3& spawnPosition) {
 	std::string name = "Cube_" + std::to_string(nextCubeID);
 	nextCubeID++;
@@ -750,13 +716,9 @@ Triangle::~Triangle() {
 	delete lightCubeShader;
 
 	glDeleteVertexArrays(1, &VAO);
-	glDeleteVertexArrays(1, &lightVAO);
 	glDeleteBuffers(1, &VBO);
 	glDeleteBuffers(1, &EBO);
 
-	glDeleteVertexArrays(1, &groundVAO);
-	glDeleteBuffers(1, &groundVBO);
-	glDeleteBuffers(1, &groundEBO);
 	glDeleteTextures(1, &groundTexture);
 	glDeleteTextures(1, &cubeTexture);
 
@@ -806,11 +768,16 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 	}
 
 	bool hasLightEntity = !activeLightPositions.empty();
-	if (!hasLightEntity) {
-		activeLightPositions.push_back(lightPos);
-	}
+	// Use ambient directional light settings if no lights are spawned in the scene
+	glm::vec3 mainLightDir = GetSunDirection();
 
-	glm::vec3 mainLightDir = glm::normalize(activeLightPositions[0]);
+	if (!activeLightPositions.empty()) {
+		glm::vec3 lightPos = activeLightPositions[0];
+		// Ensure position isn't zero vector before normalizing
+		if (glm::length(lightPos) > 0.0001f) {
+			mainLightDir = glm::normalize(lightPos);
+		}
+	}
 
 	// Viewport & Frustum parameters
 	float nearPlane = 0.1f;
@@ -826,68 +793,71 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 			nearPlane, farPlane, fovDeg, aspect, mainLightDir, viewMatrix
 		);
 
-		// Bind Shadow Framebuffer
-		glBindFramebuffer(GL_FRAMEBUFFER, shadowMap->fbo);
-		glViewport(0, 0, shadowMap->shadowResolution, shadowMap->shadowResolution);
-		glEnable(GL_DEPTH_TEST);
-		glDepthMask(GL_TRUE);
-		glClear(GL_DEPTH_BUFFER_BIT);
+		// Guard against empty cascade matrices
+		if (!shadowMap->shadowMatrices.empty()) {
+			// Bind Shadow Framebuffer
+			glBindFramebuffer(GL_FRAMEBUFFER, shadowMap->fbo);
+			glViewport(0, 0, shadowMap->shadowResolution, shadowMap->shadowResolution);
+			glEnable(GL_DEPTH_TEST);
+			glDepthMask(GL_TRUE);
+			glClear(GL_DEPTH_BUFFER_BIT);
 
-		csmShader->use();
+			csmShader->use();
 
-		for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
-			std::string uniformName = "shadowMatrices[" + std::to_string(i) + "]";
-			csmShader->setMat4(uniformName, shadowMap->shadowMatrices[i]);
-		}
-
-		int csmModelLoc = glGetUniformLocation(csmShader->ID, "model");
-
-		// Draw Depth Geometry
-		for (const auto& obj : sceneObjects) {
-			if (!obj.visible || obj.type == ObjectType::Light) continue;
-
-			glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(obj.transformMatrix));
-
-			if (obj.type == ObjectType::Ground) {
-				glBindVertexArray(groundVAO);
-				glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+			for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
+				std::string uniformName = "shadowMatrices[" + std::to_string(i) + "]";
+				csmShader->setMat4(uniformName, shadowMap->shadowMatrices[i]);
 			}
-			else {
-				switch (obj.type) {
-				case ObjectType::Sphere:
-					glBindVertexArray(sphereVAO);
-					glDrawElements(GL_TRIANGLES, sphereIndexCount, GL_UNSIGNED_INT, 0);
-					break;
-				case ObjectType::Cylinder:
-					glBindVertexArray(cylinderVAO);
-					glDrawElements(GL_TRIANGLES, cylinderIndexCount, GL_UNSIGNED_INT, 0);
-					break;
-				case ObjectType::Plane:
-					glBindVertexArray(planeVAO);
+
+			int csmModelLoc = glGetUniformLocation(csmShader->ID, "model");
+
+			// Draw Depth Geometry
+			for (const auto& obj : sceneObjects) {
+				if (!obj.visible || obj.type == ObjectType::Light) continue;
+
+				glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(obj.transformMatrix));
+
+				if (obj.type == ObjectType::Ground) {
+					glBindVertexArray(groundVAO);
 					glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-					break;
-				case ObjectType::Prism:
-					glBindVertexArray(prismVAO);
-					glDrawElements(GL_TRIANGLES, prismIndexCount, GL_UNSIGNED_INT, 0);
-					break;
-				case ObjectType::Terrain:
-					glBindVertexArray(terrainVAO);
-					glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
-					break;
-				case ObjectType::Cube:
-				default:
-					glBindVertexArray(VAO);
-					glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
-					break;
+				}
+				else {
+					switch (obj.type) {
+					case ObjectType::Sphere:
+						glBindVertexArray(sphereVAO);
+						glDrawElements(GL_TRIANGLES, sphereIndexCount, GL_UNSIGNED_INT, 0);
+						break;
+					case ObjectType::Cylinder:
+						glBindVertexArray(cylinderVAO);
+						glDrawElements(GL_TRIANGLES, cylinderIndexCount, GL_UNSIGNED_INT, 0);
+						break;
+					case ObjectType::Plane:
+						glBindVertexArray(planeVAO);
+						glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+						break;
+					case ObjectType::Prism:
+						glBindVertexArray(prismVAO);
+						glDrawElements(GL_TRIANGLES, prismIndexCount, GL_UNSIGNED_INT, 0);
+						break;
+					case ObjectType::Terrain:
+						glBindVertexArray(terrainVAO);
+						glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+						break;
+					case ObjectType::Cube:
+					default:
+						glBindVertexArray(VAO);
+						glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+						break;
+					}
 				}
 			}
-		}
 
-		// Draw depth for terrain preview
-		if (terrainObjectId == -1 && terrainIndexCount > 0) {
-			glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
-			glBindVertexArray(terrainVAO);
-			glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+			// Draw depth for terrain preview
+			if (terrainObjectId == -1 && terrainIndexCount > 0) {
+				glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
+				glBindVertexArray(terrainVAO);
+				glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+			}
 		}
 	}
 
@@ -908,7 +878,14 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 	glm::vec3 activeSunDir = GetSunDirection();
 
 	// Update positions list (Position 0 represents the primary directional light direction projected into world space)
-	activeLightPositions[0] = cameraPos + activeSunDir * 100.0f; // Track sun light source relative to camera
+	if (activeLightPositions.empty()) {
+		// If no light objects exist, push the primary sun light position as element 0
+		activeLightPositions.push_back(cameraPos + activeSunDir * 100.0f);
+	}
+	else {
+		// Overwrite the first light object's position with the active sun position
+		activeLightPositions[0] = cameraPos + activeSunDir * 100.0f;
+	}
 
 	myShader->use();
 
@@ -929,12 +906,16 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 	glUniformMatrix4fv(glGetUniformLocation(myShader->ID, "view"), 1, GL_FALSE, glm::value_ptr(viewMatrix));
 	glUniformMatrix4fv(glGetUniformLocation(myShader->ID, "projection"), 1, GL_FALSE, glm::value_ptr(projectionMatrix));
 
+	// Pass the raw sun direction directly to the shader
+	glUniform3fv(glGetUniformLocation(myShader->ID, "mainSunDir"), 1, glm::value_ptr(activeSunDir));
+
 	glUniform3fv(glGetUniformLocation(myShader->ID, "lightColor"), 1, glm::value_ptr(lightSettings.sunColor* lightSettings.sunIntensity));
 	glUniform1f(glGetUniformLocation(myShader->ID, "ambientIntensity"), lightSettings.ambientIntensity);
 	glUniform1f(glGetUniformLocation(myShader->ID, "shadowBiasMin"), lightSettings.shadowBiasMin);
 	glUniform1f(glGetUniformLocation(myShader->ID, "shadowBiasMax"), lightSettings.shadowBiasMax);
 	glUniform1i(glGetUniformLocation(myShader->ID, "debugCascades"), lightSettings.debugCascades ? 1 : 0);
 
+	// Now activeLightPositions is GUARANTEED to have at least 1 element, making this call safe:
 	glUniform3fv(
 		glGetUniformLocation(myShader->ID, "lightPositions"),
 		(GLsizei)activeLightPositions.size(),
@@ -1032,10 +1013,10 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 	glUniformMatrix4fv(glGetUniformLocation(lightCubeShader->ID, "projection"), 1, GL_FALSE, glm::value_ptr(projectionMatrix));
 	int lightModelLoc = glGetUniformLocation(lightCubeShader->ID, "model");
 
+	// ONLY render physical light cubes if a light object exists in sceneObjects
 	if (hasLightEntity) {
 		for (const auto& obj : sceneObjects) {
-			if (!obj.visible) continue;
-			if (obj.type != ObjectType::Light) continue;
+			if (!obj.visible || obj.type != ObjectType::Light) continue;
 
 			glm::mat4 lightModel = obj.transformMatrix;
 			lightModel = glm::scale(lightModel, glm::vec3(0.2f));
@@ -1044,14 +1025,6 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 			glBindVertexArray(lightVAO);
 			glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
 		}
-	}
-	else {
-		glm::mat4 lightModel = glm::mat4(1.0f);
-		lightModel = glm::translate(lightModel, lightPos);
-		lightModel = glm::scale(lightModel, glm::vec3(0.2f));
-		glUniformMatrix4fv(lightModelLoc, 1, GL_FALSE, glm::value_ptr(lightModel));
-		glBindVertexArray(lightVAO);
-		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
 	}
 
 	glBindVertexArray(0);
