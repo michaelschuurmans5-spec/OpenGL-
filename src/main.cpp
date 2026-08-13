@@ -283,6 +283,8 @@ int main() {
                         ImGui::BulletText("Hold Right-Click: Look around with mouse");
                         ImGui::BulletText("Scroll Wheel: Zoom Camera In & Out");
                         ImGui::BulletText("ESC: Exit Window | F1: Crop Window Layout");
+                        ImGui::BulletText("FOCUS:F");
+
                         ImGui::Unindent();
 
                         ImGui::TreePop();
