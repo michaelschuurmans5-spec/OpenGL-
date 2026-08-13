@@ -8,7 +8,9 @@
 // NOTE: Sphere/Plane/Cylinder/Prism are new "basic shape" types for the
 // drag-and-drop workflow. They currently share the Cube's mesh as a
 // placeholder (see Triangle::Draw) until dedicated geometry is added.
-enum class ObjectType { Cube, Sphere, Plane, Cylinder, Prism, Light, Ground };
+// Terrain is the Level Designer > Terrain Generator's procedural mesh -
+// see Triangle::PreviewTerrain / CommitTerrain / DeleteTerrain.
+enum class ObjectType { Cube, Sphere, Plane, Cylinder, Prism, Light, Ground, Terrain };
 
 // Which loaded texture (if any) a basic shape should be rendered with.
 enum class TextureSlot { None, Container, Grass };
@@ -57,6 +59,7 @@ inline std::string ToString(ObjectType type) {
 	case ObjectType::Prism:    return "Prism";
 	case ObjectType::Light:    return "Light";
 	case ObjectType::Ground:   return "Ground";
+	case ObjectType::Terrain: return "Terrain";
 	}
 	return "Unknown";
 }

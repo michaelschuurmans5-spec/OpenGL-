@@ -5,6 +5,7 @@
 // 2. Project Headers
 #include "Triangle.h"
 #include "Camera.h"
+#include "TerrainParams.h"
 
 // 3. UI Frameworks
 #include <imgui.h>
@@ -49,6 +50,14 @@ static char g_renameBuffer[64] = "";    // scratch buffer for the rename input
 static bool g_focusRequest = false;     // set by the outliner "Focus" button (same as pressing F)
 static int  g_pendingDeleteId = -1;  // Delete
 static bool g_openDeletePopup = false;
+
+// ---------------------------------------------------------
+// Level Designer > Terrain Generator panel state
+// ---------------------------------------------------------
+static TerrainParams g_terrainParams;
+static bool g_terrainDirty = true;            // true when sliders changed since last preview regen
+static bool g_openTerrainConfirmPopup = false;
+static bool g_terrainPanelWasOpen = false;    // regen the preview the first time the panel is (re)opened
 
 static void SetBuffer(char* buf, size_t bufSize, const std::string& value) {
     strncpy(buf, value.c_str(), bufSize - 1);
@@ -691,6 +700,87 @@ int main() {
                     }
 
 
+                    // =====================================================
+                    // LEVEL DESIGNER
+                    // =====================================================
+                    if (ImGui::TreeNodeEx(
+                        "Level Designer",
+                        ImGuiTreeNodeFlags_SpanAvailWidth))
+                    {
+                        ImGui::Indent();
+
+                        // -------------------------------------------------
+                        // TERRAIN GENERATOR
+                        // -------------------------------------------------
+                        bool terrainNodeOpen = ImGui::TreeNodeEx(
+                            "Terrain Generator",
+                            ImGuiTreeNodeFlags_SpanAvailWidth);
+
+                        if (terrainNodeOpen)
+                        {
+                            ImGui::Indent();
+
+                            // Regenerate the preview whenever the panel is (re)opened
+                            // so there's always something in the viewport reacting to
+                            // the sliders, even before the first slider touch.
+                            if (!g_terrainPanelWasOpen) {
+                                g_terrainDirty = true;
+                            }
+
+                            ImGui::TextDisabled(myTriangle.IsTerrainCommitted()
+                                ? "Editing the terrain already in the scene."
+                                : "Adjust sliders to preview, then Generate Terrain.");
+                            ImGui::Spacing();
+
+                            ImGui::TextDisabled("Shape");
+                            g_terrainDirty |= ImGui::SliderFloat("Terrain Size", &g_terrainParams.size, 5.0f, 100.0f);
+                            g_terrainDirty |= ImGui::SliderInt("Resolution", &g_terrainParams.resolution, 8, 200);
+
+                            ImGui::Spacing();
+                            ImGui::TextDisabled("Features (0 = off)");
+                            g_terrainDirty |= ImGui::SliderFloat("Hills", &g_terrainParams.hillScale, 0.0f, 5.0f);
+                            g_terrainDirty |= ImGui::SliderFloat("Mountains", &g_terrainParams.mountainScale, 0.0f, 5.0f);
+                            g_terrainDirty |= ImGui::SliderFloat("Valleys", &g_terrainParams.valleyScale, 0.0f, 5.0f);
+                            g_terrainDirty |= ImGui::SliderFloat("Holes", &g_terrainParams.holeScale, 0.0f, 5.0f);
+                            g_terrainDirty |= ImGui::SliderFloat("Rocks", &g_terrainParams.rockScale, 0.0f, 5.0f);
+
+                            ImGui::Spacing();
+                            g_terrainDirty |= ImGui::SliderInt("Seed", &g_terrainParams.seed, 0, 9999);
+
+                            // Live preview: regenerate the mesh the instant any
+                            // slider above moved, so the viewport updates as you drag.
+                            if (g_terrainDirty) {
+                                myTriangle.PreviewTerrain(g_terrainParams);
+                                g_terrainDirty = false;
+                            }
+
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+
+                            if (ImGui::Button("Generate Terrain", ImVec2(160.0f, 0.0f))) {
+                                g_openTerrainConfirmPopup = true;
+                            }
+
+                            if (myTriangle.IsTerrainCommitted()) {
+                                ImGui::SameLine();
+                                if (ImGui::Button("Delete Terrain", ImVec2(140.0f, 0.0f))) {
+                                    myTriangle.DeleteTerrain();
+                                    g_terrainParams = TerrainParams(); // reset sliders to defaults
+                                    g_terrainDirty = true;
+                                }
+                            }
+
+                            ImGui::Unindent();
+                            ImGui::TreePop();
+                        }
+                        g_terrainPanelWasOpen = terrainNodeOpen;
+
+                        ImGui::Unindent();
+                        ImGui::TreePop();
+                    }
+
+
                     // Close MENU
                     ImGui::TreePop();
                 }
@@ -712,6 +802,7 @@ int main() {
                         objects[deleteIdx].name.c_str(), objects[deleteIdx].id);
                     ImGui::Spacing();
                     if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
+                        myTriangle.OnObjectDeleted(g_pendingDeleteId); // keep terrain tracking in sync
                         objects.erase(objects.begin() + deleteIdx);
                         if (selectedIndex == deleteIdx)      selectedIndex = -1;
                         else if (selectedIndex > deleteIdx)  selectedIndex--;
@@ -725,6 +816,25 @@ int main() {
                     if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
                         g_pendingDeleteId = -1; ImGui::CloseCurrentPopup();
                     }
+                }
+                ImGui::EndPopup();
+            }
+
+            if (g_openTerrainConfirmPopup) { ImGui::OpenPopup("Generate Terrain?"); g_openTerrainConfirmPopup = false; }
+
+            if (ImGui::BeginPopupModal("Generate Terrain?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                ImGui::Text(myTriangle.IsTerrainCommitted()
+                    ? "Apply these changes to the terrain in the scene?"
+                    : "Apply this terrain to the viewport scene?");
+                ImGui::Spacing();
+                if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
+                    myTriangle.CommitTerrain();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
+                    ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndPopup();
             }

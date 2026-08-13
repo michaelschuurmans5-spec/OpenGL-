@@ -236,6 +236,185 @@ namespace {
 		outIndexCount = (unsigned int)indices.size();
 		UploadMesh(outVAO, outVBO, outEBO, vertices, indices);
 	}
+
+	// -----------------------------------------------------------------
+	// Level Designer > Terrain Generator
+	// -----------------------------------------------------------------
+
+	// Deterministic 2D hash so the same seed always produces the same
+	// terrain layout, and different seeds produce different layouts.
+	float Hash2D(int x, int y, int seed) {
+		unsigned int h = (unsigned int)(x * 374761393 + y * 668265263 + seed * 2147483647u);
+		h = (h ^ (h >> 13)) * 1274126177u;
+		h = h ^ (h >> 16);
+		return (float)(h & 0xFFFFFF) / (float)0xFFFFFF; // [0,1)
+	}
+
+	// Smoothly-interpolated value noise built on top of Hash2D.
+	float SmoothNoise2D(float x, float y, int seed) {
+		int x0 = (int)floorf(x), y0 = (int)floorf(y);
+		int x1 = x0 + 1, y1 = y0 + 1;
+		float tx = x - x0, ty = y - y0;
+
+		float h00 = Hash2D(x0, y0, seed);
+		float h10 = Hash2D(x1, y0, seed);
+		float h01 = Hash2D(x0, y1, seed);
+		float h11 = Hash2D(x1, y1, seed);
+
+		float sx = tx * tx * (3.0f - 2.0f * tx); // smoothstep
+		float sy = ty * ty * (3.0f - 2.0f * ty);
+
+		float top = h00 + (h10 - h00) * sx;
+		float bottom = h01 + (h11 - h01) * sx;
+		return (top + (bottom - top) * sy) * 2.0f - 1.0f; // [-1,1]
+	}
+
+	// Fractal Brownian Motion: several octaves of SmoothNoise2D layered
+	// together for natural-looking rolling terrain (drives "Hills").
+	float FBM(float x, float y, int seed, int octaves) {
+		float total = 0.0f, amplitude = 1.0f, frequency = 1.0f, maxAmp = 0.0f;
+		for (int i = 0; i < octaves; i++) {
+			total += SmoothNoise2D(x * frequency, y * frequency, seed + i * 101) * amplitude;
+			maxAmp += amplitude;
+			amplitude *= 0.5f;
+			frequency *= 2.0f;
+		}
+		return maxAmp > 0.0f ? total / maxAmp : 0.0f; // [-1,1]
+	}
+
+	// Ridged noise: folds the noise so it always peaks upward, giving the
+	// jagged look used by "Mountains".
+	float RidgedNoise(float x, float y, int seed, int octaves) {
+		float total = 0.0f, amplitude = 1.0f, frequency = 1.0f, maxAmp = 0.0f;
+		for (int i = 0; i < octaves; i++) {
+			float n = 1.0f - fabsf(SmoothNoise2D(x * frequency, y * frequency, seed + i * 53));
+			total += n * n * amplitude;
+			maxAmp += amplitude;
+			amplitude *= 0.5f;
+			frequency *= 2.0f;
+		}
+		return maxAmp > 0.0f ? total / maxAmp : 0.0f; // [0,1]
+	}
+
+	// Computes terrain height at a normalized grid position (u,v in [0,1])
+	// from the Level Designer sliders. Every feature is additive or
+	// subtractive so dialing its slider to 0 removes it entirely.
+	float ComputeTerrainHeight(float u, float v, const TerrainParams& params) {
+		float height = 0.0f;
+
+		// Hills: broad, low-frequency rolling elevation
+		height += FBM(u * 3.0f, v * 3.0f, params.seed, 4) * params.hillScale;
+
+		// Mountains: ridged, higher-frequency sharp peaks
+		if (params.mountainScale > 0.0f) {
+			float ridge = RidgedNoise(u * 2.0f, v * 2.0f, params.seed + 500, 4);
+			height += ridge * ridge * params.mountainScale * 3.0f;
+		}
+
+		// Valleys: broad, low-frequency depressions cut into the base
+		if (params.valleyScale > 0.0f) {
+			float dip = FBM(u * 1.5f, v * 1.5f, params.seed + 900, 3);
+			height -= fabsf(dip) * params.valleyScale * 2.0f;
+		}
+
+		// Holes: sparse, localized circular pits scattered across the grid
+		if (params.holeScale > 0.0f) {
+			const int holeCount = 10;
+			for (int i = 0; i < holeCount; i++) {
+				float hx = Hash2D(i, 17, params.seed + 1300);
+				float hy = Hash2D(i, 91, params.seed + 1300);
+				float dx = u - hx, dy = v - hy;
+				float dist = sqrtf(dx * dx + dy * dy);
+				const float radius = 0.06f;
+				if (dist < radius) {
+					float falloff = 1.0f - (dist / radius);
+					height -= falloff * falloff * params.holeScale * 2.0f;
+				}
+			}
+		}
+
+		// Rocks: high-frequency surface roughness on top of everything else
+		if (params.rockScale > 0.0f) {
+			height += FBM(u * 20.0f, v * 20.0f, params.seed + 2200, 2) * params.rockScale * 0.3f;
+		}
+
+		return height;
+	}
+
+	// Builds/rebuilds a resolution x resolution grid mesh on the XZ plane,
+	// sized size x size and centered at the origin, with heights driven by
+	// ComputeTerrainHeight() and normals from central-difference gradients.
+	// If outVAO already exists, its buffers are re-uploaded in place
+	// (cheap - no new GL objects) so live slider dragging doesn't leak VAOs.
+	void CreateTerrainMesh(unsigned int& outVAO, unsigned int& outVBO, unsigned int& outEBO,
+		unsigned int& outIndexCount, const TerrainParams& params) {
+
+		int res = params.resolution < 2 ? 2 : params.resolution;
+		float size = params.size;
+		float half = size * 0.5f;
+		float cellSize = size / res;
+
+		std::vector<float> heights((size_t)(res + 1) * (res + 1));
+		for (int iz = 0; iz <= res; iz++) {
+			for (int ix = 0; ix <= res; ix++) {
+				float u = (float)ix / res;
+				float v = (float)iz / res;
+				heights[iz * (res + 1) + ix] = ComputeTerrainHeight(u, v, params);
+			}
+		}
+
+		std::vector<float> vertices;
+		vertices.reserve((size_t)(res + 1) * (res + 1) * 8);
+
+		for (int iz = 0; iz <= res; iz++) {
+			for (int ix = 0; ix <= res; ix++) {
+				float x = -half + ix * cellSize;
+				float z = -half + iz * cellSize;
+				float y = heights[iz * (res + 1) + ix];
+
+				float hL = heights[iz * (res + 1) + (ix > 0 ? ix - 1 : ix)];
+				float hR = heights[iz * (res + 1) + (ix < res ? ix + 1 : ix)];
+				float hD = heights[(iz > 0 ? iz - 1 : iz) * (res + 1) + ix];
+				float hU = heights[(iz < res ? iz + 1 : iz) * (res + 1) + ix];
+
+				glm::vec3 normal = glm::normalize(glm::vec3(hL - hR, 2.0f * cellSize, hD - hU));
+
+				vertices.push_back(x); vertices.push_back(y); vertices.push_back(z);
+				vertices.push_back(normal.x); vertices.push_back(normal.y); vertices.push_back(normal.z);
+				vertices.push_back((float)ix / res * 8.0f); vertices.push_back((float)iz / res * 8.0f);
+			}
+		}
+
+		std::vector<unsigned int> indices;
+		indices.reserve((size_t)res * res * 6);
+		for (int iz = 0; iz < res; iz++) {
+			for (int ix = 0; ix < res; ix++) {
+				unsigned int i0 = iz * (res + 1) + ix;
+				unsigned int i1 = i0 + 1;
+				unsigned int i2 = i0 + (res + 1);
+				unsigned int i3 = i2 + 1;
+
+				indices.push_back(i0); indices.push_back(i2); indices.push_back(i1);
+				indices.push_back(i1); indices.push_back(i2); indices.push_back(i3);
+			}
+		}
+
+		outIndexCount = (unsigned int)indices.size();
+
+		if (outVAO == 0) {
+			glGenVertexArrays(1, &outVAO);
+			glGenBuffers(1, &outVBO);
+			glGenBuffers(1, &outEBO);
+		}
+
+		glBindVertexArray(outVAO);
+		glBindBuffer(GL_ARRAY_BUFFER, outVBO);
+		glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_DYNAMIC_DRAW);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, outEBO);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_DYNAMIC_DRAW);
+		SetupMeshAttribs();
+		glBindVertexArray(0);
+	}
 }
 
 Triangle::Triangle() {
@@ -483,7 +662,70 @@ void Triangle::SpawnShape(ObjectType type, const glm::vec3& spawnPosition, const
 	sceneObjects.push_back(obj);
 }
 
-// FIXED: Added matrix baking configuration to light entities
+// ---------------------------------------------------------------------
+// Level Designer > Terrain Generator
+// ---------------------------------------------------------------------
+
+void Triangle::PreviewTerrain(const TerrainParams& params) {
+	terrainParams = params;
+	CreateTerrainMesh(terrainVAO, terrainVBO, terrainEBO, terrainIndexCount, terrainParams);
+	// If a terrain is already committed, it renders through the sceneObjects
+	// loop below using this same VAO, so the change is visible immediately -
+	// that's the "see it happen in the viewport" live preview.
+}
+
+void Triangle::CommitTerrain() {
+	if (terrainIndexCount == 0) return; // nothing generated yet - Generate has no effect
+	if (terrainObjectId != -1) return;  // already committed, nothing further to add
+
+	GameObject obj{};
+	obj.type = ObjectType::Terrain;
+	obj.position = glm::vec3(0.0f);
+	obj.scale = glm::vec3(1.0f);
+	obj.name = "Terrain";
+	obj.rotates = false;
+	obj.rotation = glm::vec3(0.0f);
+	obj.transformMatrix = glm::mat4(1.0f);
+	obj.baseColor = glm::vec3(0.35f, 0.55f, 0.25f); // grassy green default
+	obj.textureSlot = TextureSlot::None;
+	obj.isBasicShape = false;
+
+	sceneObjects.push_back(obj);
+	terrainObjectId = obj.id;
+}
+
+void Triangle::DeleteTerrain() {
+	if (terrainObjectId != -1) {
+		for (size_t i = 0; i < sceneObjects.size(); i++) {
+			if (sceneObjects[i].id == terrainObjectId) {
+				sceneObjects.erase(sceneObjects.begin() + i);
+				break;
+			}
+		}
+		terrainObjectId = -1;
+	}
+
+	if (terrainVAO != 0) {
+		glDeleteVertexArrays(1, &terrainVAO);
+		glDeleteBuffers(1, &terrainVBO);
+		glDeleteBuffers(1, &terrainEBO);
+		terrainVAO = terrainVBO = terrainEBO = 0;
+	}
+	terrainIndexCount = 0;
+}
+
+void Triangle::OnObjectDeleted(int objectId) {
+	if (objectId == terrainObjectId) {
+		// The GameObject was removed by the generic Viewport Manager delete
+		// flow rather than the panel's own "Delete Terrain" button. Drop the
+		// commit tracking but keep the mesh around as an uncommitted preview
+		// (Draw() will keep showing it until Delete Terrain is pressed, or
+		// it gets committed again).
+		terrainObjectId = -1;
+	}
+}
+
+// Added matrix baking configuration to light entities
 void Triangle::SpawnLight(const glm::vec3& spawnPosition) {
 	std::string name = "Light_" + std::to_string(nextLightID);
 	nextLightID++;
@@ -529,6 +771,12 @@ Triangle::~Triangle() {
 	glDeleteVertexArrays(1, &prismVAO);
 	glDeleteBuffers(1, &prismVBO);
 	glDeleteBuffers(1, &prismEBO);
+
+	if (terrainVAO != 0) {
+		glDeleteVertexArrays(1, &terrainVAO);
+		glDeleteBuffers(1, &terrainVBO);
+		glDeleteBuffers(1, &terrainEBO);
+	}
 }
 
 void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatrix, const glm::vec3& lightPos, const glm::vec3& cameraPos) const {
@@ -629,6 +877,10 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 				glBindVertexArray(prismVAO);
 				glDrawElements(GL_TRIANGLES, prismIndexCount, GL_UNSIGNED_INT, 0);
 				break;
+			case ObjectType::Terrain:
+				glBindVertexArray(terrainVAO);
+				glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+				break;
 			case ObjectType::Cube:
 			default:
 				glBindVertexArray(VAO);
@@ -636,6 +888,17 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 				break;
 			}
 		}
+	}
+
+	// Live terrain preview: generated by the Level Designer sliders but not
+	// yet confirmed via Generate Terrain, so it isn't a scene object yet -
+	// drawn directly at the origin so it's still visible while tuning.
+	if (terrainObjectId == -1 && terrainIndexCount > 0) {
+		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
+		glUniform3f(objectColorLoc, 0.35f, 0.55f, 0.25f);
+		glUniform1i(useTexLoc, 0);
+		glBindVertexArray(terrainVAO);
+		glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
 	}
 
 	// ----------------------------------------------------

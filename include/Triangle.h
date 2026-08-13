@@ -2,6 +2,7 @@
 
 #include "Shader.h"
 #include "GameObject.h"
+#include "TerrainParams.h"
 
 // std
 #include <vector>
@@ -25,6 +26,35 @@ public:
         const glm::vec3& baseColor, TextureSlot textureSlot);
 
     std::vector<GameObject>& GetSceneObjects() { return sceneObjects; }
+
+    // ---------------------------------------------------------------
+    // Level Designer > Terrain Generator
+    // ---------------------------------------------------------------
+    // Regenerates the terrain mesh from params immediately. Used both for
+    // the live slider preview (called every time a slider changes) and as
+    // the final rebuild right before/after a Generate confirm. If a
+    // terrain is already committed to the scene, it picks up the new mesh
+    // automatically since it shares the same GL buffers.
+    void PreviewTerrain(const TerrainParams& params);
+
+    // Locks the current preview mesh in as a real scene object (so it
+    // shows in the Viewport Manager and can be selected/renamed/deleted
+    // like anything else). Safe to call again later - if a terrain is
+    // already committed this just re-affirms it rather than duplicating it.
+    void CommitTerrain();
+
+    // Removes the terrain from the scene and frees its mesh entirely.
+    void DeleteTerrain();
+
+    // Lets the generic Viewport Manager "Delete Object" flow tell Triangle
+    // when the committed terrain's GameObject was deleted directly from
+    // the outliner, so terrain tracking doesn't go stale. The mesh itself
+    // is left alone (it drops back to being an uncommitted live preview).
+    void OnObjectDeleted(int objectId);
+
+    bool HasTerrainPreview() const { return terrainIndexCount > 0; }
+    bool IsTerrainCommitted() const { return terrainObjectId != -1; }
+    const TerrainParams& GetTerrainParams() const { return terrainParams; }
 
 private:
     // Next Cube spawn 
@@ -53,6 +83,12 @@ private:
 
     unsigned int prismVAO = 0, prismVBO = 0, prismEBO = 0;
     unsigned int prismIndexCount = 0;
+
+    // Level Designer > Terrain Generator mesh + state
+    unsigned int terrainVAO = 0, terrainVBO = 0, terrainEBO = 0;
+    unsigned int terrainIndexCount = 0;
+    TerrainParams terrainParams;
+    int terrainObjectId = -1; // -1 = generated but not yet committed to the scene
 
     Shader* myShader;
     Shader* lightCubeShader;
