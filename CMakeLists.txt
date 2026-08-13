@@ -21,8 +21,9 @@ add_executable(${PROJECT_NAME}
     include/imgui/backends/imgui_impl_opengl3.cpp
     include/GameObject.h
     include/imgui/backends/ImGuizmo.cpp
-    
-  "include/Terrainparams.h")
+    include/Terrainparams.h
+    include/ShadowMap.h
+)
 
 # For ImGuizmo 
 target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DEFINE_MATH_OPERATORS)

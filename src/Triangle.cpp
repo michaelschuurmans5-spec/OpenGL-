@@ -423,6 +423,10 @@ Triangle::Triangle() {
 	myShader = new Shader("Assets/Shaders/Shapes/Triangle.vert", "Assets/Shaders/Shapes/Triangle.frag");
 	lightCubeShader = new Shader("Assets/Shaders/Shapes/LightCube.vert", "Assets/Shaders/Shapes/LightCube.frag");
 
+	csmShader = new Shader("Assets/Shaders/Lighting/Shadows/csm.vert",
+		"Assets/Shaders/Lighting/Shadows/csm.frag",
+		"Assets/Shaders/Lighting/Shadows/csm.geom"); // Note: Pass geometry shader path if Shader class supports 3 paths
+
 	// SET UP DATA (Positions, Normals, TexCoords)
 	float vertices[] = {
 		// Positions          // Normals           // TexCoords
@@ -779,13 +783,22 @@ Triangle::~Triangle() {
 	}
 }
 
-void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatrix, const glm::vec3& lightPos, const glm::vec3& cameraPos) const {
+void Triangle::Draw(const glm::mat4& viewMatrix,
+	const glm::mat4& projectionMatrix,
+	const glm::vec3& lightPos,
+	const glm::vec3& cameraPos) const
+{
+	// 1. Get main viewport dimensions
+	GLint viewport[4];
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	int currentWidth = viewport[2];
+	int currentHeight = viewport[3];
 
 	const int MAX_LIGHTS = 8;
 	std::vector<glm::vec3> activeLightPositions;
 
 	for (const auto& obj : sceneObjects) {
-		if (!obj.visible) continue; // hidden via the Viewport Manager eye icon
+		if (!obj.visible) continue;
 		if (obj.type == ObjectType::Light) {
 			activeLightPositions.push_back(obj.position);
 			if (activeLightPositions.size() >= MAX_LIGHTS) break;
@@ -793,20 +806,134 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 	}
 
 	bool hasLightEntity = !activeLightPositions.empty();
-
 	if (!hasLightEntity) {
 		activeLightPositions.push_back(lightPos);
 	}
 
-	// ----------------------------------------------------
-	// PASS 1: RENDER MAIN SCENE ENTITIES (CUBE & GROUND)
-	// ----------------------------------------------------
+	glm::vec3 mainLightDir = glm::normalize(activeLightPositions[0]);
+
+	// Viewport & Frustum parameters
+	float nearPlane = 0.1f;
+	float farPlane = 500.0f;
+	float fovDeg = 45.0f;
+	float aspect = (currentHeight > 0) ? static_cast<float>(currentWidth) / static_cast<float>(currentHeight) : 1.0f;
+
+	// ====================================================
+	// PASS 0: CSM DEPTH PASS
+	// ====================================================
+	if (shadowMap && csmShader) {
+		shadowMap->UpdateCascades(
+			nearPlane, farPlane, fovDeg, aspect, mainLightDir, viewMatrix
+		);
+
+		// Bind Shadow Framebuffer
+		glBindFramebuffer(GL_FRAMEBUFFER, shadowMap->fbo);
+		glViewport(0, 0, shadowMap->shadowResolution, shadowMap->shadowResolution);
+		glEnable(GL_DEPTH_TEST);
+		glDepthMask(GL_TRUE);
+		glClear(GL_DEPTH_BUFFER_BIT);
+
+		csmShader->use();
+
+		for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
+			std::string uniformName = "shadowMatrices[" + std::to_string(i) + "]";
+			csmShader->setMat4(uniformName, shadowMap->shadowMatrices[i]);
+		}
+
+		int csmModelLoc = glGetUniformLocation(csmShader->ID, "model");
+
+		// Draw Depth Geometry
+		for (const auto& obj : sceneObjects) {
+			if (!obj.visible || obj.type == ObjectType::Light) continue;
+
+			glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(obj.transformMatrix));
+
+			if (obj.type == ObjectType::Ground) {
+				glBindVertexArray(groundVAO);
+				glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+			}
+			else {
+				switch (obj.type) {
+				case ObjectType::Sphere:
+					glBindVertexArray(sphereVAO);
+					glDrawElements(GL_TRIANGLES, sphereIndexCount, GL_UNSIGNED_INT, 0);
+					break;
+				case ObjectType::Cylinder:
+					glBindVertexArray(cylinderVAO);
+					glDrawElements(GL_TRIANGLES, cylinderIndexCount, GL_UNSIGNED_INT, 0);
+					break;
+				case ObjectType::Plane:
+					glBindVertexArray(planeVAO);
+					glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+					break;
+				case ObjectType::Prism:
+					glBindVertexArray(prismVAO);
+					glDrawElements(GL_TRIANGLES, prismIndexCount, GL_UNSIGNED_INT, 0);
+					break;
+				case ObjectType::Terrain:
+					glBindVertexArray(terrainVAO);
+					glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+					break;
+				case ObjectType::Cube:
+				default:
+					glBindVertexArray(VAO);
+					glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+					break;
+				}
+			}
+		}
+
+		// Draw depth for terrain preview
+		if (terrainObjectId == -1 && terrainIndexCount > 0) {
+			glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
+			glBindVertexArray(terrainVAO);
+			glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+		}
+	}
+
+	// ====================================================
+	// CRITICAL STATE RESTORATION FOR MAIN RENDER PASS
+	// ====================================================
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDrawBuffer(GL_BACK); // Explicitly restore color writing to the default screen buffer!
+	glViewport(viewport[0], viewport[1], currentWidth, currentHeight);
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(GL_TRUE);
+
+	// ====================================================
+	// PASS 1: RENDER MAIN SCENE
+	// ====================================================
+
+	// Calculate active light direction from ImGui angles
+	glm::vec3 activeSunDir = GetSunDirection();
+
+	// Update positions list (Position 0 represents the primary directional light direction projected into world space)
+	activeLightPositions[0] = cameraPos + activeSunDir * 100.0f; // Track sun light source relative to camera
+
 	myShader->use();
+
+	if (shadowMap) {
+		glActiveTexture(GL_TEXTURE5);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMap->depthArrayTexture);
+		glUniform1i(glGetUniformLocation(myShader->ID, "shadowMapArray"), 5);
+
+		for (size_t i = 0; i < shadowMap->cascadeSplits.size(); ++i) {
+			std::string splitUniform = "cascadeSplits[" + std::to_string(i) + "]";
+			std::string matrixUniform = "shadowMatrices[" + std::to_string(i) + "]";
+
+			glUniform1f(glGetUniformLocation(myShader->ID, splitUniform.c_str()), shadowMap->cascadeSplits[i]);
+			glUniformMatrix4fv(glGetUniformLocation(myShader->ID, matrixUniform.c_str()), 1, GL_FALSE, glm::value_ptr(shadowMap->shadowMatrices[i]));
+		}
+	}
 
 	glUniformMatrix4fv(glGetUniformLocation(myShader->ID, "view"), 1, GL_FALSE, glm::value_ptr(viewMatrix));
 	glUniformMatrix4fv(glGetUniformLocation(myShader->ID, "projection"), 1, GL_FALSE, glm::value_ptr(projectionMatrix));
 
-	glUniform3f(glGetUniformLocation(myShader->ID, "lightColor"), 1.0f, 1.0f, 1.0f);
+	glUniform3fv(glGetUniformLocation(myShader->ID, "lightColor"), 1, glm::value_ptr(lightSettings.sunColor* lightSettings.sunIntensity));
+	glUniform1f(glGetUniformLocation(myShader->ID, "ambientIntensity"), lightSettings.ambientIntensity);
+	glUniform1f(glGetUniformLocation(myShader->ID, "shadowBiasMin"), lightSettings.shadowBiasMin);
+	glUniform1f(glGetUniformLocation(myShader->ID, "shadowBiasMax"), lightSettings.shadowBiasMax);
+	glUniform1i(glGetUniformLocation(myShader->ID, "debugCascades"), lightSettings.debugCascades ? 1 : 0);
 
 	glUniform3fv(
 		glGetUniformLocation(myShader->ID, "lightPositions"),
@@ -826,10 +953,9 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 	int objectColorLoc = glGetUniformLocation(myShader->ID, "objectColor");
 
 	for (const auto& obj : sceneObjects) {
-		if (!obj.visible) continue; // hidden via the Viewport Manager eye icon
+		if (!obj.visible) continue;
 		if (obj.type == ObjectType::Light) continue;
 
-		// Bind the pure, uncorrupted matrix updated natively by ImGuizmo
 		glm::mat4 model = obj.transformMatrix;
 		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
 
@@ -844,8 +970,6 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 			glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 		}
 		else {
-			// Basic shapes (Cube, Sphere, Plane, Cylinder, Prism) now each
-			// render with their own generated mesh; color/texture stay per-object.
 			glUniform3f(objectColorLoc, obj.baseColor.r, obj.baseColor.g, obj.baseColor.b);
 
 			GLuint texToBind = 0;
@@ -890,9 +1014,7 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 		}
 	}
 
-	// Live terrain preview: generated by the Level Designer sliders but not
-	// yet confirmed via Generate Terrain, so it isn't a scene object yet -
-	// drawn directly at the origin so it's still visible while tuning.
+	// Live terrain preview
 	if (terrainObjectId == -1 && terrainIndexCount > 0) {
 		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
 		glUniform3f(objectColorLoc, 0.35f, 0.55f, 0.25f);
@@ -901,9 +1023,9 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 		glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
 	}
 
-	// ----------------------------------------------------
-	// PASS 2: RENDER THE PHYSICAL LIGHT SOURCE CUBE
-	// ----------------------------------------------------
+	// ====================================================
+	// PASS 2: RENDER PHYSICAL LIGHT CUBES
+	// ====================================================
 	lightCubeShader->use();
 
 	glUniformMatrix4fv(glGetUniformLocation(lightCubeShader->ID, "view"), 1, GL_FALSE, glm::value_ptr(viewMatrix));
@@ -912,10 +1034,9 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 
 	if (hasLightEntity) {
 		for (const auto& obj : sceneObjects) {
-			if (!obj.visible) continue; // hidden via the Viewport Manager eye icon
+			if (!obj.visible) continue;
 			if (obj.type != ObjectType::Light) continue;
 
-			// Extract the light matrix managed dynamically inside your viewport space
 			glm::mat4 lightModel = obj.transformMatrix;
 			lightModel = glm::scale(lightModel, glm::vec3(0.2f));
 
@@ -935,5 +1056,4 @@ void Triangle::Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatr
 
 	glBindVertexArray(0);
 	glBindTexture(GL_TEXTURE_2D, 0);
-
 }

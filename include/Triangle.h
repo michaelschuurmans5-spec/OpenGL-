@@ -3,6 +3,7 @@
 #include "Shader.h"
 #include "GameObject.h"
 #include "TerrainParams.h"
+#include "ShadowMap.h"
 
 // std
 #include <vector>
@@ -30,47 +31,62 @@ public:
     // ---------------------------------------------------------------
     // Level Designer > Terrain Generator
     // ---------------------------------------------------------------
-    // Regenerates the terrain mesh from params immediately. Used both for
-    // the live slider preview (called every time a slider changes) and as
-    // the final rebuild right before/after a Generate confirm. If a
-    // terrain is already committed to the scene, it picks up the new mesh
-    // automatically since it shares the same GL buffers.
     void PreviewTerrain(const TerrainParams& params);
-
-    // Locks the current preview mesh in as a real scene object (so it
-    // shows in the Viewport Manager and can be selected/renamed/deleted
-    // like anything else). Safe to call again later - if a terrain is
-    // already committed this just re-affirms it rather than duplicating it.
     void CommitTerrain();
-
-    // Removes the terrain from the scene and frees its mesh entirely.
     void DeleteTerrain();
-
-    // Lets the generic Viewport Manager "Delete Object" flow tell Triangle
-    // when the committed terrain's GameObject was deleted directly from
-    // the outliner, so terrain tracking doesn't go stale. The mesh itself
-    // is left alone (it drops back to being an uncommitted live preview).
     void OnObjectDeleted(int objectId);
 
     bool HasTerrainPreview() const { return terrainIndexCount > 0; }
     bool IsTerrainCommitted() const { return terrainObjectId != -1; }
     const TerrainParams& GetTerrainParams() const { return terrainParams; }
 
+    // ShadowMap
+    ShadowMap* shadowMap = nullptr;
+    Shader* csmShader = nullptr;
+
+    // ---------------------------------------------------------------
+    // Lighting & Atmosphere Controls
+    // ---------------------------------------------------------------
+    struct LightSettings {
+        float sunAzimuth = 45.0f;     // Horizontal angle around scene (0° - 360°)
+        float sunElevation = 45.0f;   // Vertical height in sky (5° - 90°)
+        glm::vec3 sunColor = glm::vec3(1.0f, 0.98f, 0.9f); // Slightly warm daylight
+        float sunIntensity = 1.0f;
+        float ambientIntensity = 0.2f;
+
+        // Shadow parameters
+        float shadowBiasMin = 0.0005f;
+        float shadowBiasMax = 0.005f;
+        bool debugCascades = false;
+    } lightSettings;
+
+    // Helper to compute world space light direction vector from spherical angles
+    glm::vec3 GetSunDirection() const {
+        float azRad = glm::radians(lightSettings.sunAzimuth);
+        float elRad = glm::radians(lightSettings.sunElevation);
+
+        glm::vec3 dir;
+        dir.x = cos(elRad) * sin(azRad);
+        dir.y = sin(elRad);
+        dir.z = cos(elRad) * cos(azRad);
+        return glm::normalize(dir);
+    }
+
 private:
-    // Next Cube spawn 
+    // Scene Object tracking
     std::vector<GameObject> sceneObjects;
     int nextCubeID = 1;
     int nextLightID = 1;
 
     // Cube mesh
-    unsigned int VAO, VBO, EBO;
+    unsigned int VAO = 0, VBO = 0, EBO = 0;
     // Light source cube mesh (shares VBO/EBO with the cube, own VAO)
-    unsigned int lightVAO;
-    unsigned int cubeTexture;
+    unsigned int lightVAO = 0;
+    unsigned int cubeTexture = 0;
 
     // Ground plane mesh
-    unsigned int groundVAO, groundVBO, groundEBO;
-    unsigned int groundTexture;
+    unsigned int groundVAO = 0, groundVBO = 0, groundEBO = 0;
+    unsigned int groundTexture = 0;
 
     // Basic-shape meshes used by the Objects > Shapes drag-and-drop panel
     unsigned int sphereVAO = 0, sphereVBO = 0, sphereEBO = 0;
@@ -90,6 +106,7 @@ private:
     TerrainParams terrainParams;
     int terrainObjectId = -1; // -1 = generated but not yet committed to the scene
 
-    Shader* myShader;
-    Shader* lightCubeShader;
+    // Shaders
+    Shader* myShader = nullptr;
+    Shader* lightCubeShader = nullptr;
 };

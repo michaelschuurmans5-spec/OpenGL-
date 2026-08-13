@@ -702,6 +702,35 @@ int main() {
                         ImGui::TreePop();
                     }
 
+                    // LIGHTING & ATMOSPHERE (NEW)
+                    if (ImGui::TreeNodeEx(
+                        "Lighting & Atmosphere",
+                        ImGuiTreeNodeFlags_SpanAvailWidth))
+                    {
+                        ImGui::Indent();
+
+                        ImGui::TextDisabled("Sun Direction");
+                        ImGui::SliderFloat("Azimuth", &myTriangle.lightSettings.sunAzimuth, 0.0f, 360.0f, "%.1f deg");
+                        ImGui::SliderFloat("Elevation", &myTriangle.lightSettings.sunElevation, 2.0f, 89.0f, "%.1f deg");
+
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("Light Properties");
+                        ImGui::ColorEdit3("Sun Color", &myTriangle.lightSettings.sunColor.x);
+                        ImGui::SliderFloat("Intensity", &myTriangle.lightSettings.sunIntensity, 0.0f, 3.0f, "%.2f");
+                        ImGui::SliderFloat("Ambient Light", &myTriangle.lightSettings.ambientIntensity, 0.0f, 1.0f, "%.2f");
+
+                        ImGui::Spacing();
+                        if (ImGui::TreeNode("Shadow Fine-Tuning"))
+                        {
+                            ImGui::SliderFloat("Min Bias", &myTriangle.lightSettings.shadowBiasMin, 0.0001f, 0.005f, "%.4f");
+                            ImGui::SliderFloat("Max Bias", &myTriangle.lightSettings.shadowBiasMax, 0.001f, 0.02f, "%.4f");
+                            ImGui::Checkbox("Debug Cascade Split Colors", &myTriangle.lightSettings.debugCascades);
+                            ImGui::TreePop();
+                        }
+
+                        ImGui::Unindent();
+                        ImGui::TreePop();
+                    }
 
                     // =====================================================
                     // LEVEL DESIGNER
