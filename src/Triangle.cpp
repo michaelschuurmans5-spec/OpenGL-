@@ -802,12 +802,18 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 			glDepthMask(GL_TRUE);
 			glClear(GL_DEPTH_BUFFER_BIT);
 
+			// DISABLE CULLING FOR DEPTH PASS TO PREVENT MISSING SHADOWS
+			glDisable(GL_CULL_FACE);
+
 			csmShader->use();
 
 			for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
 				std::string uniformName = "shadowMatrices[" + std::to_string(i) + "]";
 				csmShader->setMat4(uniformName, shadowMap->shadowMatrices[i]);
 			}
+
+			// Restore default culling if you use it in main pass
+			glEnable(GL_CULL_FACE);
 
 			int csmModelLoc = glGetUniformLocation(csmShader->ID, "model");
 
