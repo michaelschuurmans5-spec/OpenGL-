@@ -22,7 +22,7 @@ add_executable(${PROJECT_NAME}
     include/GameObject.h
     include/imgui/backends/ImGuizmo.cpp
     
-)
+  "include/Terrainparams.h")
 
 # For ImGuizmo 
 target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DEFINE_MATH_OPERATORS)

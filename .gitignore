@@ -1,0 +1,15 @@
+# Visual Studio
+.vs/
+
+# CMake build output
+out/
+
+# Visual Studio generated files
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# Build folders
+build/
+cmake-build-*/
