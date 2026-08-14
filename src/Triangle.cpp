@@ -1,5 +1,6 @@
 #include "Triangle.h"
 #include "stb_image.h"
+#include "Sky.h"
 
 // Standard C++ 
 #include <fstream>
@@ -427,6 +428,25 @@ Triangle::Triangle() {
 		"Assets/Shaders/Lighting/Shadows/csm.frag",
 		"Assets/Shaders/Lighting/Shadows/csm.geom"); // Note: Pass geometry shader path if Shader class supports 3 paths
 
+	myShader = new Shader(
+		"Assets/Shaders/Shapes/Triangle.vert",
+		"Assets/Shaders/Shapes/Triangle.frag"
+	);
+
+	lightCubeShader = new Shader(
+		"Assets/Shaders/Shapes/LightCube.vert",
+		"Assets/Shaders/Shapes/LightCube.frag"
+	);
+
+	csmShader = new Shader(
+		"Assets/Shaders/Lighting/Shadows/csm.vert",
+		"Assets/Shaders/Lighting/Shadows/csm.frag",
+		"Assets/Shaders/Lighting/Shadows/csm.geom"
+	);
+
+	sky = new Sky();
+
+
 	// SET UP DATA (Positions, Normals, TexCoords)
 	float vertices[] = {
 		// Positions          // Normals           // TexCoords
@@ -715,6 +735,10 @@ Triangle::~Triangle() {
 	delete myShader;
 	delete lightCubeShader;
 
+	delete myShader;
+	delete lightCubeShader;
+	delete sky;
+
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
 	glDeleteBuffers(1, &EBO);
@@ -867,19 +891,41 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 		}
 	}
 
-	// ====================================================
 	// CRITICAL STATE RESTORATION FOR MAIN RENDER PASS
-	// ====================================================
+	
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glDrawBuffer(GL_BACK); // Explicitly restore color writing to the default screen buffer!
 	glViewport(viewport[0], viewport[1], currentWidth, currentHeight);
 	glEnable(GL_DEPTH_TEST);
 	glDepthMask(GL_TRUE);
 
-	// ====================================================
-	// PASS 1: RENDER MAIN SCENE
-	// ====================================================
 
+	// SKY PASS
+	if (sky)
+	{
+		// The sky is infinitely far away.
+		// We want it to pass when the depth value is equal
+		// to the far/background depth.
+
+		glDepthFunc(GL_LEQUAL);
+
+		// We don't want the sky to write depth.
+		glDepthMask(GL_FALSE);
+
+		sky->Draw(
+			viewMatrix,
+			projectionMatrix,
+			GetSunDirection()
+		);
+
+		// Restore normal depth behaviour for the scene.
+		glDepthMask(GL_TRUE);
+		glDepthFunc(GL_LESS);
+	}
+
+
+	// PASS 1: RENDER MAIN SCENE
+	
 	// Calculate active light direction from ImGui angles
 	glm::vec3 activeSunDir = GetSunDirection();
 

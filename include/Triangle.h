@@ -4,6 +4,7 @@
 #include "GameObject.h"
 #include "TerrainParams.h"
 #include "ShadowMap.h"
+#include "Sky.h"
 
 // std
 #include <vector>
@@ -15,6 +16,7 @@
 class Triangle {
 public:
     Triangle();
+       
     ~Triangle();
 
     void Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatrix, const glm::vec3& lightPos, const glm::vec3& cameraPos) const;
@@ -44,9 +46,12 @@ public:
     ShadowMap* shadowMap = nullptr;
     Shader* csmShader = nullptr;
 
-    // ---------------------------------------------------------------
+    // Sky/Atmosphere 
+    Sky* sky = nullptr;
+
+
     // Lighting & Atmosphere Controls
-    // ---------------------------------------------------------------
+    
     struct LightSettings {
         float sunAzimuth = 45.0f;     // Horizontal angle around scene (0° - 360°)
         float sunElevation = 45.0f;   // Vertical height in sky (5° - 90°)

@@ -23,7 +23,7 @@ add_executable(${PROJECT_NAME}
     include/imgui/backends/ImGuizmo.cpp
     include/Terrainparams.h
     include/ShadowMap.h
-)
+ "include/Sky.h" "src/Sky.cpp")
 
 # For ImGuizmo 
 target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
