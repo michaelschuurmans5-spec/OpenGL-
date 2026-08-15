@@ -34,9 +34,11 @@ public:
     // Level Designer > Terrain Generator
     // ---------------------------------------------------------------
     void PreviewTerrain(const TerrainParams& params);
+    float GetTerrainHeightAt(float worldX, float worldZ) const;
     void CommitTerrain();
     void DeleteTerrain();
     void OnObjectDeleted(int objectId);
+   
 
     bool HasTerrainPreview() const { return terrainIndexCount > 0; }
     bool IsTerrainCommitted() const { return terrainObjectId != -1; }
@@ -110,6 +112,10 @@ private:
     unsigned int terrainIndexCount = 0;
     TerrainParams terrainParams;
     int terrainObjectId = -1; // -1 = generated but not yet committed to the scene
+
+    std::vector<float> terrainHeights;   // CPU copy of the last-generated heightmap (res+1)x(res+1)
+    int   terrainHeightRes = 0;         // resolution the heightmap above was built at
+    float terrainHeightSize = 0.0f;      // world-space size (matches TerrainParams::size)
 
     // Shaders
     Shader* myShader = nullptr;

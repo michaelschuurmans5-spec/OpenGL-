@@ -342,13 +342,115 @@ namespace {
 		return height;
 	}
 
+	// Samples height bilinearly at a continuous grid position, and returns
+	// the local gradient (points uphill). Grid space here means x/z run
+	// from 0 to res, matching the heights[] array's indexing.
+	void SampleHeightAndGradient(const std::vector<float>& heights, int res,
+		float x, float z, float& outHeight, float& outGradX, float& outGradZ) {
+
+		int ix = (int)x, iz = (int)z;
+		if (ix < 0) ix = 0; if (ix > res - 1) ix = res - 1;
+		if (iz < 0) iz = 0; if (iz > res - 1) iz = res - 1;
+		float u = x - ix, v = z - iz;
+
+		int i00 = iz * (res + 1) + ix;
+		int i10 = i00 + 1;
+		int i01 = i00 + (res + 1);
+		int i11 = i01 + 1;
+
+		float h00 = heights[i00], h10 = heights[i10], h01 = heights[i01], h11 = heights[i11];
+
+		outHeight = h00 * (1 - u) * (1 - v) + h10 * u * (1 - v) + h01 * (1 - u) * v + h11 * u * v;
+		outGradX = (h10 - h00) * (1 - v) + (h11 - h01) * v;
+		outGradZ = (h01 - h00) * (1 - u) + (h11 - h10) * u;
+	}
+
+	// Spreads a height change over the 4 cells surrounding (x,z), weighted
+	// by bilinear distance - this is how a droplet erodes/deposits without
+	// leaving hard single-pixel spikes.
+	void DepositHeight(std::vector<float>& heights, int res, float x, float z, float amount) {
+		int ix = (int)x, iz = (int)z;
+		if (ix < 0) ix = 0; if (ix > res - 1) ix = res - 1;
+		if (iz < 0) iz = 0; if (iz > res - 1) iz = res - 1;
+		float u = x - ix, v = z - iz;
+
+		int i00 = iz * (res + 1) + ix;
+		heights[i00] += amount * (1 - u) * (1 - v);
+		heights[i00 + 1] += amount * u * (1 - v);
+		heights[i00 + (res + 1)] += amount * (1 - u) * v;
+		heights[i00 + (res + 1) + 1] += amount * u * v;
+	}
+
+	// Droplet-based hydraulic erosion (Beyer/Hjulstrom-style). Simulates
+	// dropletCount rain droplets, each running downhill for a short lifetime,
+	// eroding where fast/steep and depositing where slow/flat. Mutates
+	// `heights` in place. This is what turns smooth noise into terrain that
+	// looks like it was actually carved by water.
+	void ErodeTerrain(std::vector<float>& heights, int res, int seed, int dropletCount) {
+		const float inertia = 0.05f;              // how much a droplet keeps its old direction
+		const float sedimentCapacityFactor = 4.0f;
+		const float minSedimentCapacity = 0.01f;
+		const float erodeSpeed = 0.3f;
+		const float depositSpeed = 0.3f;
+		const float evaporateSpeed = 0.02f;
+		const float gravity = 4.0f;
+		const int   maxLifetime = 30;
+
+		for (int d = 0; d < dropletCount; d++) {
+			float x = Hash2D(d, 7, seed + 4000) * res;
+			float z = Hash2D(d, 13, seed + 4000) * res;
+			float dx = 0.0f, dz = 0.0f;
+			float speed = 1.0f, water = 1.0f, sediment = 0.0f;
+
+			for (int step = 0; step < maxLifetime; step++) {
+				float h, gx, gz;
+				SampleHeightAndGradient(heights, res, x, z, h, gx, gz);
+
+				dx = dx * inertia - gx * (1.0f - inertia);
+				dz = dz * inertia - gz * (1.0f - inertia);
+				float len = sqrtf(dx * dx + dz * dz);
+				if (len < 1e-6f) break;
+				dx /= len; dz /= len;
+
+				float newX = x + dx, newZ = z + dz;
+				if (newX < 0.0f || newX >= (float)res || newZ < 0.0f || newZ >= (float)res) break;
+
+				float newH, ngx, ngz;
+				SampleHeightAndGradient(heights, res, newX, newZ, newH, ngx, ngz);
+				float heightDiff = newH - h;
+
+				float capacity = fmaxf(-heightDiff * speed * water * sedimentCapacityFactor, minSedimentCapacity);
+
+				if (sediment > capacity || heightDiff > 0.0f) {
+					float depositAmount = (heightDiff > 0.0f)
+						? fminf(heightDiff, sediment)
+						: (sediment - capacity) * depositSpeed;
+					sediment -= depositAmount;
+					DepositHeight(heights, res, x, z, depositAmount);
+				}
+				else {
+					float erodeAmount = fminf((capacity - sediment) * erodeSpeed, -heightDiff);
+					DepositHeight(heights, res, x, z, -erodeAmount);
+					sediment += erodeAmount;
+				}
+
+				speed = sqrtf(fmaxf(0.0f, speed * speed + heightDiff * gravity));
+				water *= (1.0f - evaporateSpeed);
+
+				x = newX; z = newZ;
+				if (water < 0.01f) break;
+			}
+		}
+	}
+
 	// Builds/rebuilds a resolution x resolution grid mesh on the XZ plane,
 	// sized size x size and centered at the origin, with heights driven by
 	// ComputeTerrainHeight() and normals from central-difference gradients.
 	// If outVAO already exists, its buffers are re-uploaded in place
 	// (cheap - no new GL objects) so live slider dragging doesn't leak VAOs.
 	void CreateTerrainMesh(unsigned int& outVAO, unsigned int& outVBO, unsigned int& outEBO,
-		unsigned int& outIndexCount, const TerrainParams& params) {
+		unsigned int& outIndexCount, std::vector<float>& outHeights, 
+		int& outRes, const TerrainParams& params) {
 
 		int res = params.resolution < 2 ? 2 : params.resolution;
 		float size = params.size;
@@ -362,6 +464,10 @@ namespace {
 				float v = (float)iz / res;
 				heights[iz * (res + 1) + ix] = ComputeTerrainHeight(u, v, params);
 			}
+		}
+		// erosion pass 
+		if (params.erosionEnabled && params.erosionDroplets > 0) {
+			ErodeTerrain(heights, res, params.seed, params.erosionDroplets);
 		}
 
 		std::vector<float> vertices;
@@ -415,19 +521,14 @@ namespace {
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_DYNAMIC_DRAW);
 		SetupMeshAttribs();
 		glBindVertexArray(0);
+		outHeights = heights;   // keep a CPU copy for height queries (collision, scattering, etc.)
+		outRes = res;
 	}
 }
 
 Triangle::Triangle() {
 
 	// Shader loading and compiling 
-	myShader = new Shader("Assets/Shaders/Shapes/Triangle.vert", "Assets/Shaders/Shapes/Triangle.frag");
-	lightCubeShader = new Shader("Assets/Shaders/Shapes/LightCube.vert", "Assets/Shaders/Shapes/LightCube.frag");
-
-	csmShader = new Shader("Assets/Shaders/Lighting/Shadows/csm.vert",
-		"Assets/Shaders/Lighting/Shadows/csm.frag",
-		"Assets/Shaders/Lighting/Shadows/csm.geom"); // Note: Pass geometry shader path if Shader class supports 3 paths
-
 	myShader = new Shader(
 		"Assets/Shaders/Shapes/Triangle.vert",
 		"Assets/Shaders/Shapes/Triangle.frag"
@@ -591,8 +692,6 @@ Triangle::Triangle() {
 	}
 	stbi_image_free(data);
 
-	
-	
 
 	// Unbind everything safely
 	glBindVertexArray(0);
@@ -658,7 +757,9 @@ void Triangle::SpawnShape(ObjectType type, const glm::vec3& spawnPosition, const
 
 void Triangle::PreviewTerrain(const TerrainParams& params) {
 	terrainParams = params;
-	CreateTerrainMesh(terrainVAO, terrainVBO, terrainEBO, terrainIndexCount, terrainParams);
+	CreateTerrainMesh(terrainVAO, terrainVBO, terrainEBO, 
+		terrainIndexCount, terrainHeights, terrainHeightRes, terrainParams);
+	terrainHeightSize = params.size;
 	// If a terrain is already committed, it renders through the sceneObjects
 	// loop below using this same VAO, so the change is visible immediately -
 	// that's the "see it happen in the viewport" live preview.
@@ -702,6 +803,46 @@ void Triangle::DeleteTerrain() {
 		terrainVAO = terrainVBO = terrainEBO = 0;
 	}
 	terrainIndexCount = 0;
+	terrainHeights.clear();
+	terrainHeightRes = 0;
+}
+
+// Returns the terrain height at a world-space (x, z) position, bilinearly
+// interpolated between grid samples. Returns 0 if no terrain has been
+// generated yet. Used for anything that needs to sit on/follow the ground -
+// player collision, camera framing, prop placement.
+float Triangle::GetTerrainHeightAt(float worldX, float worldZ) const {
+	if (terrainHeights.empty() || terrainHeightRes <= 0 || terrainHeightSize <= 0.0f)
+		return 0.0f;
+
+	int res = terrainHeightRes;
+	float half = terrainHeightSize * 0.5f;
+
+	// World XZ -> normalized [0,1] -> continuous grid cell coordinates
+	float u = (worldX + half) / terrainHeightSize;
+	float v = (worldZ + half) / terrainHeightSize;
+	float gx = u * res;
+	float gz = v * res;
+
+	if (gx < 0.0f) gx = 0.0f;
+	if (gz < 0.0f) gz = 0.0f;
+	if (gx > (float)res - 0.001f) gx = (float)res - 0.001f;
+	if (gz > (float)res - 0.001f) gz = (float)res - 0.001f;
+
+	int ix = (int)gx, iz = (int)gz;
+	float fx = gx - ix, fz = gz - iz;
+
+	int i00 = iz * (res + 1) + ix;
+	int i10 = i00 + 1;
+	int i01 = i00 + (res + 1);
+	int i11 = i01 + 1;
+
+	float h00 = terrainHeights[i00], h10 = terrainHeights[i10];
+	float h01 = terrainHeights[i01], h11 = terrainHeights[i11];
+
+	float top = h00 * (1.0f - fx) + h10 * fx;
+	float bottom = h01 * (1.0f - fx) + h11 * fx;
+	return top * (1.0f - fz) + bottom * fz;
 }
 
 void Triangle::OnObjectDeleted(int objectId) {
@@ -734,10 +875,9 @@ void Triangle::SpawnLight(const glm::vec3& spawnPosition) {
 Triangle::~Triangle() {
 	delete myShader;
 	delete lightCubeShader;
-
-	delete myShader;
-	delete lightCubeShader;
+	delete csmShader;
 	delete sky;
+	
 
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);

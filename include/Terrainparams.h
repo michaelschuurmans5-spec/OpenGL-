@@ -14,4 +14,7 @@ struct TerrainParams {
 
 	int seed = 1337;
 
+	bool erosionEnabled = true;
+	int erosionDroplets = 30000;
+
 };

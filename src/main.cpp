@@ -776,6 +776,14 @@ int main() {
                             g_terrainDirty |= ImGui::SliderFloat("Holes", &g_terrainParams.holeScale, 0.0f, 5.0f);
                             g_terrainDirty |= ImGui::SliderFloat("Rocks", &g_terrainParams.rockScale, 0.0f, 5.0f);
 
+                            // Erosion slider 
+                            ImGui::Spacing();
+                            ImGui::TextDisabled("Erosion");
+                            g_terrainDirty |= ImGui::Checkbox("Enable Erosion", &g_terrainParams.erosionEnabled);
+                            if (g_terrainParams.erosionEnabled) {
+                                g_terrainDirty |= ImGui::SliderInt("Erosion Droplets", &g_terrainParams.erosionDroplets, 0, 100000);
+                            }
+
                             ImGui::Spacing();
                             g_terrainDirty |= ImGui::SliderInt("Seed", &g_terrainParams.seed, 0, 9999);
 
