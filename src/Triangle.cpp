@@ -1,6 +1,7 @@
 #include "Triangle.h"
 #include "stb_image.h"
 #include "Sky.h"
+#include "Model.h"
 
 // Standard C++ 
 #include <fstream>
@@ -547,6 +548,11 @@ Triangle::Triangle() {
 
 	sky = new Sky();
 
+	propShader = new Shader(
+		"Assets/Shaders/Props/Prop.vert",
+		"Assets/Shaders/Props/Prop.frag"
+	);
+	LoadPropModels();
 
 	// SET UP DATA (Positions, Normals, TexCoords)
 	float vertices[] = {
@@ -725,6 +731,30 @@ void Triangle::SpawnCube(const glm::vec3& spawnPosition) {
 	sceneObjects.push_back(cube);
 }
 
+void Triangle::LoadPropModels() {
+	// Point these at wherever you put your downloaded/exported .fbx or .obj files
+	propModels["Rock01"] = Model("Assets/Models/Props/Rock01.fbx");
+	propModels["Bush01"] = Model("Assets/Models/Props/Bush01.fbx");
+	propModels["Tree01"] = Model("Assets/Models/Props/Tree01.fbx");
+}
+
+void Triangle::SpawnProp(const std::string& modelName, const glm::vec3& spawnPosition) {
+	if (propModels.find(modelName) == propModels.end()) return;
+
+	GameObject obj{};
+	obj.type = ObjectType::Prop;
+	obj.modelName = modelName;
+	obj.position = spawnPosition;
+	obj.scale = glm::vec3(1.0f);
+	obj.rotation = glm::vec3(0.0f);
+	obj.rotates = false;
+	obj.name = modelName + "_" + std::to_string(sceneObjects.size());
+	obj.transformMatrix = glm::mat4(1.0f);
+
+	sceneObjects.push_back(obj);
+}
+
+
 // Generic spawn used by the Objects > Shapes properties panel's "Create"
 // button and by dropping a shape from that menu into the viewport.
 // Each ObjectType is drawn with its own dedicated mesh (see Draw()).
@@ -873,12 +903,14 @@ void Triangle::SpawnLight(const glm::vec3& spawnPosition) {
 }
 
 Triangle::~Triangle() {
+	// Delete Shaders
 	delete myShader;
 	delete lightCubeShader;
 	delete csmShader;
 	delete sky;
+	delete propShader;
 	
-
+	// Delete Containers
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
 	glDeleteBuffers(1, &EBO);
@@ -928,6 +960,38 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 		if (obj.type == ObjectType::Light) {
 			activeLightPositions.push_back(obj.position);
 			if (activeLightPositions.size() >= MAX_LIGHTS) break;
+		}
+	}
+
+	for (const auto& obj : sceneObjects) {
+
+		if (obj.type == ObjectType::Prop) {
+
+			auto modelIt = propModels.find(obj.modelName);
+
+			// Model wasn't loaded, so skip this prop.
+			if (modelIt == propModels.end()) {
+				continue;
+			}
+
+			propShader->use();
+
+			propShader->setMat4("view", viewMatrix);
+			propShader->setMat4("projection", projectionMatrix);
+
+			// Use the Lighting Designer's current sun direction.
+			propShader->setVec3(
+				"sunDirection",
+				GetSunDirection()
+			);
+
+			propShader->setMat4(
+				"model",
+				obj.transformMatrix
+			);
+
+			// Draw the loaded model.
+			modelIt->second.Draw(*propShader);
 		}
 	}
 

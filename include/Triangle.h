@@ -5,13 +5,16 @@
 #include "TerrainParams.h"
 #include "ShadowMap.h"
 #include "Sky.h"
+#include "Model.h"
 
 // std
 #include <vector>
 #include <string>
 
-// glm
+
 #include <glm/glm/glm.hpp>
+#include <unordered_map>
+
 
 class Triangle {
 public:
@@ -50,6 +53,13 @@ public:
 
     // Sky/Atmosphere 
     Sky* sky = nullptr;
+
+    // Wiring into Triangle 
+    std::unordered_map<std::string, Model> propModels; // key = prop name, e.g. "Rock01"
+    Shader* propShader = nullptr;
+
+    void LoadPropModels();
+    void SpawnProp(const std::string& modelName, const glm::vec3& spawnPosition);
 
 
     // Lighting & Atmosphere Controls
