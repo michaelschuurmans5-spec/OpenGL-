@@ -13,7 +13,9 @@
 
 
 #include <glm/glm/glm.hpp>
+#include <memory>
 #include <unordered_map>
+
 
 
 class Triangle {
@@ -55,12 +57,17 @@ public:
     Sky* sky = nullptr;
 
     // Wiring into Triangle 
-    std::unordered_map<std::string, Model> propModels; // key = prop name, e.g. "Rock01"
+    std::unordered_map<std::string, std::unique_ptr<Model>> propModels;
     Shader* propShader = nullptr;
 
     void LoadPropModels();
     void SpawnProp(const std::string& modelName, const glm::vec3& spawnPosition);
+    void DrawPropsInstanced(const glm::mat4& view, const glm::mat4& projection,
+        const glm::vec3& sunDir, const glm::vec3& cameraPos) const;
 
+    std::unordered_map<std::string, unsigned int> textureLibrary; // extra swappable textures, keyed by filename
+    void LoadTextureLibrary();
+    unsigned int LoadTexture(const std::string& path); // generic loader, not tied to a Model
 
     // Lighting & Atmosphere Controls
     

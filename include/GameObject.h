@@ -10,7 +10,7 @@
 // placeholder (see Triangle::Draw) until dedicated geometry is added.
 // Terrain is the Level Designer > Terrain Generator's procedural mesh -
 // see Triangle::PreviewTerrain / CommitTerrain / DeleteTerrain.
-enum class ObjectType { Cube, Sphere, Plane, Cylinder, Prism, Light, Ground, Terrain , Prop};
+enum class ObjectType { Cube, Sphere, Plane, Cylinder, Prism, Light, Ground, Terrain, Prop};
 
 // Which loaded texture (if any) a basic shape should be rendered with.
 enum class TextureSlot { None, Container, Grass };
@@ -52,6 +52,8 @@ struct GameObject {
 	// Imported model information
     // Empty for basic shapes; contains the model key/path for Prop objects.
 	std::string modelName;
+
+	unsigned int textureOverride = 0; // 0 = use the model's own textures
 };
 
 inline std::string ToString(ObjectType type) {
@@ -64,6 +66,8 @@ inline std::string ToString(ObjectType type) {
 	case ObjectType::Light:    return "Light";
 	case ObjectType::Ground:   return "Ground";
 	case ObjectType::Terrain: return "Terrain";
+	case ObjectType::Prop: return "Prop";
+
 	}
 	return "Unknown";
 }

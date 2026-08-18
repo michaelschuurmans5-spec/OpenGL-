@@ -9,6 +9,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <filesystem>
 
 // Third party
 #include <GLFW/glfw3.h>
@@ -609,6 +610,15 @@ Triangle::Triangle() {
 	glGenBuffers(1, &VBO);
 	glGenBuffers(1, &EBO);
 
+
+	std::cout
+		<< "SHAPE CUBE GPU HANDLES: "
+		<< "VAO=" << VAO
+		<< " VBO=" << VBO
+		<< " EBO=" << EBO
+		<< std::endl;
+
+
 	// Stride for the cube: 8 floats
 	GLsizei stride = 8 * sizeof(float);
 
@@ -731,27 +741,175 @@ void Triangle::SpawnCube(const glm::vec3& spawnPosition) {
 	sceneObjects.push_back(cube);
 }
 
-void Triangle::LoadPropModels() {
-	// Point these at wherever you put your downloaded/exported .fbx or .obj files
-	propModels["Rock01"] = Model("Assets/Models/Props/Rock01.fbx");
-	propModels["Bush01"] = Model("Assets/Models/Props/Bush01.fbx");
-	propModels["Tree01"] = Model("Assets/Models/Props/Tree01.fbx");
+void Triangle::LoadPropModels()
+{
+	const std::vector<std::string> propNames =
+	{
+		"Rock01",
+		"Bush01",
+		"Tree01"
+	};
+
+	for (const auto& name : propNames)
+	{
+		std::string path =
+			"Assets/Models/Props/" +
+			name +
+			"/" +
+			name +
+			".fbx";
+
+		std::ifstream test(path);
+
+		if (!test.good())
+		{
+			std::cout
+				<< "LoadPropModels: skipping "
+				<< name
+				<< " - no file at "
+				<< path
+				<< " yet."
+				<< std::endl;
+
+			continue;
+		}
+
+		// Create the Model directly on the heap.
+		auto model = std::make_unique<Model>(path);
+
+		if (!model->IsLoaded())
+		{
+			std::cout
+				<< "LoadPropModels: "
+				<< name
+				<< " failed to load."
+				<< std::endl;
+
+			continue;
+		}
+
+		// Store ownership in propModels.
+		propModels[name] = std::move(model);
+
+		std::cout
+			<< "LoadPropModels: loaded "
+			<< name
+			<< std::endl;
+	}
 }
 
-void Triangle::SpawnProp(const std::string& modelName, const glm::vec3& spawnPosition) {
-	if (propModels.find(modelName) == propModels.end()) return;
+unsigned int Triangle::LoadTexture(const std::string& path) {
+	int width, height, channels;
+	unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 0);
+	if (!data) {
+		std::cout << "LoadTexture: failed to load " << path << std::endl;
+		return 0;
+	}
+	GLenum format = (channels == 1) ? GL_RED : (channels == 3) ? GL_RGB : GL_RGBA;
+
+	unsigned int id;
+	glGenTextures(1, &id);
+	glBindTexture(GL_TEXTURE_2D, id);
+	glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+	glGenerateMipmap(GL_TEXTURE_2D);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	stbi_image_free(data);
+	return id;
+}
+
+void Triangle::LoadTextureLibrary() {
+	std::string dir = "Assets/Textures/Library";
+	if (!std::filesystem::exists(dir)) return;
+
+	for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+		if (!entry.is_regular_file()) continue;
+		std::string name = entry.path().filename().string();
+		unsigned int id = LoadTexture(entry.path().string());
+		if (id != 0) textureLibrary[name] = id;
+	}
+}
+
+void Triangle::DrawPropsInstanced(
+	const glm::mat4& view,
+	const glm::mat4& projection,
+	const glm::vec3& sunDir,
+	const glm::vec3& cameraPos) const
+{
+	std::unordered_map<std::string, std::vector<glm::mat4>> groups;
+
+	for (const auto& obj : sceneObjects)
+	{
+		if (obj.type != ObjectType::Prop)
+			continue;
+
+		groups[obj.modelName].push_back(obj.transformMatrix);
+	}
+
+	if (groups.empty())
+		return;
+
+	propShader->use();
+
+	propShader->setMat4("view", view);
+	propShader->setMat4("projection", projection);
+	propShader->setVec3("sunDirection", sunDir);
+	propShader->setVec3("viewPos", cameraPos);
+
+	for (const auto& [modelName, transforms] : groups)
+	{
+		auto modelIt = propModels.find(modelName);
+
+		if (modelIt == propModels.end())
+			continue;
+
+		if (!modelIt->second->IsLoaded())
+			continue;
+
+		modelIt->second->DrawInstanced(
+			*propShader,
+			transforms
+		);
+	}
+}
+
+void Triangle::SpawnProp(
+	const std::string& modelName,
+	const glm::vec3& spawnPosition)
+{
+	if (propModels.find(modelName) == propModels.end())
+		return;
 
 	GameObject obj{};
+
 	obj.type = ObjectType::Prop;
+	obj.isBasicShape = false;
 	obj.modelName = modelName;
 	obj.position = spawnPosition;
+
+	// Scale it down cleanly so its byte matrices don't overflow your layout
 	obj.scale = glm::vec3(1.0f);
+
 	obj.rotation = glm::vec3(0.0f);
 	obj.rotates = false;
-	obj.name = modelName + "_" + std::to_string(sceneObjects.size());
-	obj.transformMatrix = glm::mat4(1.0f);
 
+	obj.name = modelName + "_" + std::to_string(sceneObjects.size());
+
+	// Clean translation * scale order evaluation
+	obj.transformMatrix =
+		glm::translate(glm::mat4(1.0f), spawnPosition) *
+		glm::scale(glm::mat4(1.0f), obj.scale);
+
+	obj.textureOverride = 0;
 	sceneObjects.push_back(obj);
+
+	std::cout
+		<< "SpawnProp: spawned " << modelName
+		<< " at " << spawnPosition.x << ", " << spawnPosition.y << ", " << spawnPosition.z
+		<< " with scale " << obj.scale.x
+		<< std::endl;
 }
 
 
@@ -955,45 +1113,22 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 	const int MAX_LIGHTS = 8;
 	std::vector<glm::vec3> activeLightPositions;
 
-	for (const auto& obj : sceneObjects) {
-		if (!obj.visible) continue;
-		if (obj.type == ObjectType::Light) {
-			activeLightPositions.push_back(obj.position);
-			if (activeLightPositions.size() >= MAX_LIGHTS) break;
-		}
+	for (const auto& obj : sceneObjects)
+	{
+		if (!obj.visible)
+			continue;
+
+		if (obj.type == ObjectType::Light)
+			continue;
+
+		// Props are rendered separately using their imported FBX model.
+		if (obj.type == ObjectType::Prop)
+			continue;
+
+		glm::mat4 model = obj.transformMatrix;
 	}
 
-	for (const auto& obj : sceneObjects) {
-
-		if (obj.type == ObjectType::Prop) {
-
-			auto modelIt = propModels.find(obj.modelName);
-
-			// Model wasn't loaded, so skip this prop.
-			if (modelIt == propModels.end()) {
-				continue;
-			}
-
-			propShader->use();
-
-			propShader->setMat4("view", viewMatrix);
-			propShader->setMat4("projection", projectionMatrix);
-
-			// Use the Lighting Designer's current sun direction.
-			propShader->setVec3(
-				"sunDirection",
-				GetSunDirection()
-			);
-
-			propShader->setMat4(
-				"model",
-				obj.transformMatrix
-			);
-
-			// Draw the loaded model.
-			modelIt->second.Draw(*propShader);
-		}
-	}
+	DrawPropsInstanced(viewMatrix, projectionMatrix, GetSunDirection(), cameraPos);
 
 	bool hasLightEntity = !activeLightPositions.empty();
 	// Use ambient directional light settings if no lights are spawned in the scene
@@ -1021,16 +1156,15 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 			nearPlane, farPlane, fovDeg, aspect, mainLightDir, viewMatrix
 		);
 
-		// Guard against empty cascade matrices
 		if (!shadowMap->shadowMatrices.empty()) {
-			// Bind Shadow Framebuffer
+			// 1. Bind Shadow Framebuffer
 			glBindFramebuffer(GL_FRAMEBUFFER, shadowMap->fbo);
 			glViewport(0, 0, shadowMap->shadowResolution, shadowMap->shadowResolution);
 			glEnable(GL_DEPTH_TEST);
 			glDepthMask(GL_TRUE);
 			glClear(GL_DEPTH_BUFFER_BIT);
 
-			// DISABLE CULLING FOR DEPTH PASS TO PREVENT MISSING SHADOWS
+			// Disable face culling for the entire depth pass to avoid front/back-face shadow acne
 			glDisable(GL_CULL_FACE);
 
 			csmShader->use();
@@ -1040,14 +1174,11 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 				csmShader->setMat4(uniformName, shadowMap->shadowMatrices[i]);
 			}
 
-			// Restore default culling if you use it in main pass
-			glEnable(GL_CULL_FACE);
-
 			int csmModelLoc = glGetUniformLocation(csmShader->ID, "model");
 
-			// Draw Depth Geometry
+			// 2. Draw Basic Shapes & Ground Geometry into CSM Depth
 			for (const auto& obj : sceneObjects) {
-				if (!obj.visible || obj.type == ObjectType::Light) continue;
+				if (!obj.visible || obj.type == ObjectType::Light || obj.type == ObjectType::Prop) continue;
 
 				glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(obj.transformMatrix));
 
@@ -1086,12 +1217,30 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 				}
 			}
 
-			// Draw depth for terrain preview
+			// 3. Draw Depth for Terrain Preview
 			if (terrainObjectId == -1 && terrainIndexCount > 0) {
 				glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
 				glBindVertexArray(terrainVAO);
 				glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
 			}
+
+			// 4. Draw FBX Instanced Props into CSM Depth
+			std::unordered_map<std::string, std::vector<glm::mat4>> propGroups;
+			for (const auto& obj : sceneObjects) {
+				if (obj.visible && obj.type == ObjectType::Prop) {
+					propGroups[obj.modelName].push_back(obj.transformMatrix);
+				}
+			}
+
+			for (const auto& [modelName, transforms] : propGroups) {
+				auto modelIt = propModels.find(modelName);
+				if (modelIt != propModels.end() && modelIt->second->IsLoaded()) {
+					modelIt->second->DrawInstanced(*csmShader, transforms);
+				}
+			}
+
+			// Restore Culling State after Depth Pass
+			glEnable(GL_CULL_FACE);
 		}
 	}
 
@@ -1191,7 +1340,7 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 
 	for (const auto& obj : sceneObjects) {
 		if (!obj.visible) continue;
-		if (obj.type == ObjectType::Light) continue;
+		if(obj.type == ObjectType::Light || obj.type == ObjectType::Prop) continue;
 
 		glm::mat4 model = obj.transformMatrix;
 		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
@@ -1260,6 +1409,8 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 		glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
 	}
 
+	DrawPropsInstanced(viewMatrix, projectionMatrix, activeSunDir, cameraPos);
+
 	// ====================================================
 	// PASS 2: RENDER PHYSICAL LIGHT CUBES
 	// ====================================================
@@ -1285,4 +1436,5 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 
 	glBindVertexArray(0);
 	glBindTexture(GL_TEXTURE_2D, 0);
+	glUseProgram(0);
 }

@@ -40,6 +40,7 @@ struct PendingShapeConfig {
 static PendingShapeConfig g_pendingShape;
 static int g_expandedShapeIndex = -1; // which shape's properties panel is open, -1 = none
 static bool g_isDraggingShape = false; // true while a shape item is being dragged toward the viewport
+static bool g_isDraggingProp = false; // true while a Models item is being dragged toward the viewport
 
 // ---------------------------------------------------------
 // Viewport Manager (right-hand outliner) state
@@ -86,6 +87,7 @@ bool firstMouse = true;
 bool showGUI = true;
 int selectedIndex = -1;
 ImGuizmo::OPERATION currentOperation = ImGuizmo::TRANSLATE;
+
 
 // --- Helper: frame the camera on a world position (shared by the F hotkey
 // and the Viewport Manager's focus button) ---
@@ -432,16 +434,29 @@ int main() {
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
 
+        // --- Clear Buffers ---
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        // --- Calculate Matrices ---
         glm::mat4 view = camera.GetViewMatrix();
-        glm::mat4 projection = glm::perspective(glm::radians(static_cast<float>(camera.Zoom)), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
+        glm::mat4 projection = glm::perspective(
+            glm::radians(static_cast<float>(camera.Zoom)),
+            (float)SCR_WIDTH / (float)SCR_HEIGHT,
+            0.1f,
+            100.0f);
         glm::vec3 lightPos(1.2f, 1.0f, 2.0f);
 
+        // --- 1. RENDER SKY (First) ---
+        // Draw sky before 3D geometry and use GL_LEQUAL depth function
+        glDepthFunc(GL_LEQUAL);
+        myTriangle.sky->Draw(view, projection, lightPos);
+        glDepthFunc(GL_LESS); // Reset back to default depth testing
+
+        // --- 2. RENDER SCENE GEOMETRY (Terrain & Objects) ---
         myTriangle.Draw(view, projection, lightPos, camera.Position);
 
-        // 1. SELECT OBJECT VIA RAY CAST DETECTOR
+        // --- 3. RAY CASTING & SELECTION ---
         double xpos, ypos;
         glfwGetCursorPos(window, &xpos, &ypos);
         if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS && !ImGuizmo::IsOver() && !ImGui::GetIO().WantCaptureMouse) {
@@ -509,6 +524,46 @@ int main() {
             ImGui::PopStyleVar();
         }
 
+        // 1c. VIEWPORT DRAG-DROP TARGET (drop a model from Objects > Models here)
+        if (g_isDraggingProp)
+        {
+            ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2((float)SCR_WIDTH, (float)SCR_HEIGHT), ImGuiCond_Always);
+
+            ImGuiWindowFlags dropZoneFlags =
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                ImGuiWindowFlags_NoDecoration;
+
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+            if (ImGui::Begin("##ViewportPropDropZone", nullptr, dropZoneFlags)) {
+                ImGui::InvisibleButton("##ViewportPropDropZoneArea", ImGui::GetWindowSize());
+
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("PROP_MODEL_NAME")) {
+                        std::string modelName((const char*)payload->Data, payload->DataSize - 1); // -1: drop the null terminator
+                        ImVec2 dropMousePos = ImGui::GetIO().MousePos;
+
+                        glm::vec3 dropPos = ScreenPosToGroundPoint(
+                            dropMousePos.x, dropMousePos.y,
+                            camera, view, projection, SCR_WIDTH, SCR_HEIGHT);
+
+                        // Snap to the actual terrain surface rather than the flat
+                        // y=0 fallback plane - matters far more for props sitting
+                        // on hills than it does for the Shapes tool.
+                        if (myTriangle.HasTerrainPreview())
+                            dropPos.y = myTriangle.GetTerrainHeightAt(dropPos.x, dropPos.z);
+
+                        myTriangle.SpawnProp(modelName, dropPos);
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
+
         // 2. IMGUI MENU PANEL
         g_isDraggingShape = false; // re-armed below only while a shape item is actively being dragged
         if (showGUI)
@@ -522,37 +577,20 @@ int main() {
                 | ImGuiWindowFlags_NoTitleBar
                 | ImGuiWindowFlags_NoScrollbar;
 
-            ImGui::PushStyleColor(
-                ImGuiCol_WindowBg,
-                ImVec4(0.1f, 0.1f, 0.1f, 0.85f)
-            );
-
-            ImGui::PushStyleVar(
-                ImGuiStyleVar_WindowPadding,
-                ImVec2(8.0f, 6.0f)
-            );
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.1f, 0.85f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
 
             if (ImGui::Begin("##PersistentMenu", nullptr, windowFlags))
             {
-                // ---------------------------------------------------------
                 // ROOT MENU
-                // ---------------------------------------------------------
-                if (ImGui::TreeNodeEx(
-                    "MENU",
-                    ImGuiTreeNodeFlags_DefaultOpen |
-                    ImGuiTreeNodeFlags_SpanAvailWidth))
+                if (ImGui::TreeNodeEx("MENU", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
                 {
                     ImGui::Separator();
 
-                    // =====================================================
                     // CONTROLS
-                    // =====================================================
-                    if (ImGui::TreeNodeEx(
-                        "Controls",
-                        ImGuiTreeNodeFlags_SpanAvailWidth))
+                    if (ImGui::TreeNodeEx("Controls", ImGuiTreeNodeFlags_SpanAvailWidth))
                     {
                         ImGui::Indent();
-
                         ImGui::TextDisabled("Viewport Controls Active:");
                         ImGui::BulletText("Left-Click an object to select.");
                         ImGui::BulletText("Press W: Translate | E: Rotate | R: Scale");
@@ -560,32 +598,19 @@ int main() {
                         ImGui::BulletText("Orbit: Hold Down left mouse A & D");
                         ImGui::BulletText("Scroll Wheel: Zoom Camera In & Out");
                         ImGui::BulletText("ESC: Exit Window | F1: Crop Window Layout");
-
-                        ImGui::BulletText("FOCUS:F");
-
                         ImGui::BulletText("FOCUS: F");
-
                         ImGui::Unindent();
 
-                        ImGui::TreePop();
+                        ImGui::TreePop(); // Close Controls
                     }
 
-
-                    // =====================================================
                     // OBJECTS
-                    // =====================================================
-                    if (ImGui::TreeNodeEx(
-                        "Objects",
-                        ImGuiTreeNodeFlags_SpanAvailWidth))
+                    if (ImGui::TreeNodeEx("Objects", ImGuiTreeNodeFlags_SpanAvailWidth))
                     {
                         ImGui::Indent();
 
-                        // -------------------------------------------------
                         // SHAPES
-                        // -------------------------------------------------
-                        if (ImGui::TreeNodeEx(
-                            "Shapes",
-                            ImGuiTreeNodeFlags_SpanAvailWidth))
+                        if (ImGui::TreeNodeEx("Shapes", ImGuiTreeNodeFlags_SpanAvailWidth))
                         {
                             ImGui::Indent();
 
@@ -605,12 +630,10 @@ int main() {
                                 bool isOpen = (g_expandedShapeIndex == i);
                                 if (ImGui::Selectable(shapeNames[i], isOpen))
                                 {
-                                    if (isOpen)
-                                    {
+                                    if (isOpen) {
                                         g_expandedShapeIndex = -1;
                                     }
-                                    else
-                                    {
+                                    else {
                                         g_expandedShapeIndex = i;
                                         g_pendingShape.type = shapeTypes[i];
                                         SetBuffer(g_pendingShape.nameBuffer, sizeof(g_pendingShape.nameBuffer), shapeNames[i]);
@@ -619,7 +642,6 @@ int main() {
                                     }
                                 }
 
-                                // DRAG SOURCE: lets you drag this shape straight into the viewport
                                 if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
                                 {
                                     draggingShapeThisFrame = true;
@@ -628,45 +650,36 @@ int main() {
                                     ImGui::EndDragDropSource();
                                 }
 
-                                // DETAILS DROPDOWN: name, mesh type, base color, texture slot, Create
                                 if (g_expandedShapeIndex == i)
                                 {
                                     ImGui::Indent();
                                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.2f));
-                                    ImGui::BeginChild(
-                                        "##ShapeDetails",
-                                        ImVec2(320.0f, 220.0f),
-                                        true,
-                                        ImGuiWindowFlags_HorizontalScrollbar);
-
-                                    ImGui::TextDisabled("Mesh Type: Basic Shape (%s)", shapeNames[i]);
-                                    ImGui::Spacing();
-
-                                    ImGui::SetNextItemWidth(160.0f);
-                                    ImGui::InputText("Name", g_pendingShape.nameBuffer, IM_ARRAYSIZE(g_pendingShape.nameBuffer));
-
-                                    ImGui::ColorEdit3("Base Color", &g_pendingShape.baseColor.x);
-
-                                    const char* textureOptions[] = { "None", "Container", "Grass" };
-                                    ImGui::SetNextItemWidth(160.0f);
-                                    ImGui::Combo("Texture Slot", &g_pendingShape.textureSlotIndex, textureOptions, IM_ARRAYSIZE(textureOptions));
-
-                                    ImGui::Spacing();
-                                    // More configuration options (roughness, material presets, etc.) can be added here later.
-
-                                    if (ImGui::Button("Create", ImVec2(120.0f, 0.0f)))
+                                    if (ImGui::BeginChild("##ShapeDetails", ImVec2(320.0f, 220.0f), true, ImGuiWindowFlags_HorizontalScrollbar))
                                     {
-                                        glm::vec3 spawnPos = camera.Position + camera.Front * 3.0f;
-                                        std::string spawnName = g_pendingShape.nameBuffer;
+                                        ImGui::TextDisabled("Mesh Type: Basic Shape (%s)", shapeNames[i]);
+                                        ImGui::Spacing();
+                                        ImGui::SetNextItemWidth(160.0f);
+                                        ImGui::InputText("Name", g_pendingShape.nameBuffer, IM_ARRAYSIZE(g_pendingShape.nameBuffer));
+                                        ImGui::ColorEdit3("Base Color", &g_pendingShape.baseColor.x);
 
-                                        myTriangle.SpawnShape(
-                                            g_pendingShape.type,
-                                            spawnPos,
-                                            spawnName,
-                                            g_pendingShape.baseColor,
-                                            ToTextureSlot(g_pendingShape.textureSlotIndex));
+                                        const char* textureOptions[] = { "None", "Container", "Grass" };
+                                        ImGui::SetNextItemWidth(160.0f);
+                                        ImGui::Combo("Texture Slot", &g_pendingShape.textureSlotIndex, textureOptions, IM_ARRAYSIZE(textureOptions));
+
+                                        ImGui::Spacing();
+                                        if (ImGui::Button("Create", ImVec2(120.0f, 0.0f)))
+                                        {
+                                            glm::vec3 spawnPos = camera.Position + camera.Front * 3.0f;
+                                            std::string spawnName = g_pendingShape.nameBuffer;
+
+                                            myTriangle.SpawnShape(
+                                                g_pendingShape.type,
+                                                spawnPos,
+                                                spawnName,
+                                                g_pendingShape.baseColor,
+                                                ToTextureSlot(g_pendingShape.textureSlotIndex));
+                                        }
                                     }
-
                                     ImGui::EndChild();
                                     ImGui::PopStyleColor();
                                     ImGui::Unindent();
@@ -678,213 +691,209 @@ int main() {
                             g_isDraggingShape = draggingShapeThisFrame;
 
                             ImGui::Unindent();
-                            ImGui::TreePop();
+                            ImGui::TreePop(); // Close Shapes
                         }
 
-
-                        // -------------------------------------------------
                         // MODELS
-                        // -------------------------------------------------
-                        if (ImGui::TreeNodeEx(
-                            "Models",
-                            ImGuiTreeNodeFlags_SpanAvailWidth))
+                        if (ImGui::TreeNodeEx("Models", ImGuiTreeNodeFlags_SpanAvailWidth))
                         {
                             ImGui::Indent();
 
-                            ImGui::BulletText("Load Model");
-                            ImGui::BulletText("Imported Models");
+                            bool draggingPropThisFrame = false;
+
+                            for (auto& [name, model] : myTriangle.propModels)
+                            {
+                                if (!model->IsLoaded()) continue;
+
+                                ImGui::PushID(name.c_str());
+                                ImGui::Selectable(name.c_str());
+
+                                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                                {
+                                    draggingPropThisFrame = true;
+                                    ImGui::SetDragDropPayload("PROP_MODEL_NAME", name.c_str(), name.size() + 1);
+                                    ImGui::Text("Place %s", name.c_str());
+                                    ImGui::EndDragDropSource();
+                                }
+
+                                ImGui::PopID();
+                            }
+
+                            g_isDraggingProp = draggingPropThisFrame;
 
                             ImGui::Unindent();
-                            ImGui::TreePop();
+                            ImGui::TreePop(); // Close Models
                         }
 
-                        ImGui::Unindent();
-                        ImGui::TreePop();
-                    }
-
-                    // LIGHTING & ATMOSPHERE (NEW)
-                    if (ImGui::TreeNodeEx(
-                        "Lighting & Atmosphere",
-                        ImGuiTreeNodeFlags_SpanAvailWidth))
-                    {
-                        ImGui::Indent();
-
-                        ImGui::TextDisabled("Sun Direction");
-                        ImGui::SliderFloat("Azimuth", &myTriangle.lightSettings.sunAzimuth, 0.0f, 360.0f, "%.1f deg");
-                        ImGui::SliderFloat("Elevation", &myTriangle.lightSettings.sunElevation, 2.0f, 89.0f, "%.1f deg");
-
-                        ImGui::Spacing();
-                        ImGui::TextDisabled("Light Properties");
-                        ImGui::ColorEdit3("Sun Color", &myTriangle.lightSettings.sunColor.x);
-                        ImGui::SliderFloat("Intensity", &myTriangle.lightSettings.sunIntensity, 0.0f, 3.0f, "%.2f");
-                        ImGui::SliderFloat("Ambient Light", &myTriangle.lightSettings.ambientIntensity, 0.0f, 1.0f, "%.2f");
-
-                        ImGui::Spacing();
-                        if (ImGui::TreeNode("Shadow Fine-Tuning"))
-                        {
-                            ImGui::SliderFloat("Min Bias", &myTriangle.lightSettings.shadowBiasMin, 0.0001f, 0.005f, "%.4f");
-                            ImGui::SliderFloat("Max Bias", &myTriangle.lightSettings.shadowBiasMax, 0.001f, 0.02f, "%.4f");
-                            ImGui::Checkbox("Debug Cascade Split Colors", &myTriangle.lightSettings.debugCascades);
-                            ImGui::TreePop();
-                        }
-
-                        ImGui::Unindent();
-                        ImGui::TreePop();
-                    }
-
-                    // =====================================================
-                    // LEVEL DESIGNER
-                    // =====================================================
-                    if (ImGui::TreeNodeEx(
-                        "Level Designer",
-                        ImGuiTreeNodeFlags_SpanAvailWidth))
-                    {
-                        ImGui::Indent();
-
-                        // -------------------------------------------------
-                        // TERRAIN GENERATOR
-                        // -------------------------------------------------
-                        bool terrainNodeOpen = ImGui::TreeNodeEx(
-                            "Terrain Generator",
-                            ImGuiTreeNodeFlags_SpanAvailWidth);
-
-                        if (terrainNodeOpen)
+                        // LIGHTING & ATMOSPHERE
+                        if (ImGui::TreeNodeEx("Lighting & Atmosphere", ImGuiTreeNodeFlags_SpanAvailWidth))
                         {
                             ImGui::Indent();
 
-                            // Regenerate the preview whenever the panel is (re)opened
-                            // so there's always something in the viewport reacting to
-                            // the sliders, even before the first slider touch.
-                            if (!g_terrainPanelWasOpen) {
-                                g_terrainDirty = true;
+                            ImGui::TextDisabled("Sun Direction");
+                            ImGui::SliderFloat("Azimuth", &myTriangle.lightSettings.sunAzimuth, 0.0f, 360.0f, "%.1f deg");
+                            ImGui::SliderFloat("Elevation", &myTriangle.lightSettings.sunElevation, 2.0f, 89.0f, "%.1f deg");
+
+                            ImGui::Spacing();
+                            ImGui::TextDisabled("Light Properties");
+                            ImGui::ColorEdit3("Sun Color", &myTriangle.lightSettings.sunColor.x);
+                            ImGui::SliderFloat("Intensity", &myTriangle.lightSettings.sunIntensity, 0.0f, 3.0f, "%.2f");
+                            ImGui::SliderFloat("Ambient Light", &myTriangle.lightSettings.ambientIntensity, 0.0f, 1.0f, "%.2f");
+
+                            ImGui::Spacing();
+                            if (ImGui::TreeNode("Shadow Fine-Tuning"))
+                            {
+                                ImGui::SliderFloat("Min Bias", &myTriangle.lightSettings.shadowBiasMin, 0.0001f, 0.005f, "%.4f");
+                                ImGui::SliderFloat("Max Bias", &myTriangle.lightSettings.shadowBiasMax, 0.001f, 0.02f, "%.4f");
+                                ImGui::Checkbox("Debug Cascade Split Colors", &myTriangle.lightSettings.debugCascades);
+                                ImGui::TreePop();
                             }
 
-                            ImGui::TextDisabled(myTriangle.IsTerrainCommitted()
-                                ? "Editing the terrain already in the scene."
-                                : "Adjust sliders to preview, then Generate Terrain.");
-                            ImGui::Spacing();
+                            ImGui::Unindent();
+                            ImGui::TreePop(); // Close Lighting & Atmosphere
+                        }
 
-                            ImGui::TextDisabled("Shape");
-                            g_terrainDirty |= ImGui::SliderFloat("Terrain Size", &g_terrainParams.size, 5.0f, 100.0f);
-                            g_terrainDirty |= ImGui::SliderInt("Resolution", &g_terrainParams.resolution, 8, 200);
+                        // LEVEL DESIGNER
+                        if (ImGui::TreeNodeEx("Level Designer", ImGuiTreeNodeFlags_SpanAvailWidth))
+                        {
+                            ImGui::Indent();
 
-                            ImGui::Spacing();
-                            ImGui::TextDisabled("Features (0 = off)");
-                            g_terrainDirty |= ImGui::SliderFloat("Hills", &g_terrainParams.hillScale, 0.0f, 5.0f);
-                            g_terrainDirty |= ImGui::SliderFloat("Mountains", &g_terrainParams.mountainScale, 0.0f, 5.0f);
-                            g_terrainDirty |= ImGui::SliderFloat("Valleys", &g_terrainParams.valleyScale, 0.0f, 5.0f);
-                            g_terrainDirty |= ImGui::SliderFloat("Holes", &g_terrainParams.holeScale, 0.0f, 5.0f);
-                            g_terrainDirty |= ImGui::SliderFloat("Rocks", &g_terrainParams.rockScale, 0.0f, 5.0f);
+                            bool terrainNodeOpen = ImGui::TreeNodeEx("Terrain Generator", ImGuiTreeNodeFlags_SpanAvailWidth);
 
-                            // Erosion slider 
-                            ImGui::Spacing();
-                            ImGui::TextDisabled("Erosion");
-                            g_terrainDirty |= ImGui::Checkbox("Enable Erosion", &g_terrainParams.erosionEnabled);
-                            if (g_terrainParams.erosionEnabled) {
-                                g_terrainDirty |= ImGui::SliderInt("Erosion Droplets", &g_terrainParams.erosionDroplets, 0, 100000);
-                            }
+                            if (terrainNodeOpen)
+                            {
+                                ImGui::Indent();
 
-                            ImGui::Spacing();
-                            g_terrainDirty |= ImGui::SliderInt("Seed", &g_terrainParams.seed, 0, 9999);
-
-                            // Live preview: regenerate the mesh the instant any
-                            // slider above moved, so the viewport updates as you drag.
-                            if (g_terrainDirty) {
-                                myTriangle.PreviewTerrain(g_terrainParams);
-                                g_terrainDirty = false;
-                            }
-
-                            ImGui::Spacing();
-                            ImGui::Separator();
-                            ImGui::Spacing();
-
-                            if (ImGui::Button("Generate Terrain", ImVec2(160.0f, 0.0f))) {
-                                g_openTerrainConfirmPopup = true;
-                            }
-
-                            if (myTriangle.IsTerrainCommitted()) {
-                                ImGui::SameLine();
-                                if (ImGui::Button("Delete Terrain", ImVec2(140.0f, 0.0f))) {
-                                    myTriangle.DeleteTerrain();
-                                    g_terrainParams = TerrainParams(); // reset sliders to defaults
+                                if (!g_terrainPanelWasOpen) {
                                     g_terrainDirty = true;
                                 }
+
+                                ImGui::TextDisabled(myTriangle.IsTerrainCommitted()
+                                    ? "Editing the terrain already in the scene."
+                                    : "Adjust sliders to preview, then Generate Terrain.");
+                                ImGui::Spacing();
+
+                                ImGui::TextDisabled("Shape");
+                                g_terrainDirty |= ImGui::SliderFloat("Terrain Size", &g_terrainParams.size, 5.0f, 100.0f);
+                                g_terrainDirty |= ImGui::SliderInt("Resolution", &g_terrainParams.resolution, 8, 200);
+
+                                ImGui::Spacing();
+                                ImGui::TextDisabled("Features (0 = off)");
+                                g_terrainDirty |= ImGui::SliderFloat("Hills", &g_terrainParams.hillScale, 0.0f, 5.0f);
+                                g_terrainDirty |= ImGui::SliderFloat("Mountains", &g_terrainParams.mountainScale, 0.0f, 5.0f);
+                                g_terrainDirty |= ImGui::SliderFloat("Valleys", &g_terrainParams.valleyScale, 0.0f, 5.0f);
+                                g_terrainDirty |= ImGui::SliderFloat("Holes", &g_terrainParams.holeScale, 0.0f, 5.0f);
+                                g_terrainDirty |= ImGui::SliderFloat("Rocks", &g_terrainParams.rockScale, 0.0f, 5.0f);
+
+                                ImGui::Spacing();
+                                ImGui::TextDisabled("Erosion");
+                                g_terrainDirty |= ImGui::Checkbox("Enable Erosion", &g_terrainParams.erosionEnabled);
+                                if (g_terrainParams.erosionEnabled) {
+                                    g_terrainDirty |= ImGui::SliderInt("Erosion Droplets", &g_terrainParams.erosionDroplets, 0, 100000);
+                                }
+
+                                ImGui::Spacing();
+                                g_terrainDirty |= ImGui::SliderInt("Seed", &g_terrainParams.seed, 0, 9999);
+
+                                if (g_terrainDirty) {
+                                    myTriangle.PreviewTerrain(g_terrainParams);
+                                    g_terrainDirty = false;
+                                }
+
+                                ImGui::Spacing();
+                                ImGui::Separator();
+                                ImGui::Spacing();
+
+                                if (ImGui::Button("Generate Terrain", ImVec2(160.0f, 0.0f))) {
+                                    g_openTerrainConfirmPopup = true;
+                                }
+
+                                if (myTriangle.IsTerrainCommitted()) {
+                                    ImGui::SameLine();
+                                    if (ImGui::Button("Delete Terrain", ImVec2(140.0f, 0.0f))) {
+                                        myTriangle.DeleteTerrain();
+                                        g_terrainParams = TerrainParams();
+                                        g_terrainDirty = true;
+                                    }
+                                }
+
+                                ImGui::Unindent();
+                                ImGui::TreePop(); // Close Terrain Generator
                             }
+                            g_terrainPanelWasOpen = terrainNodeOpen;
 
                             ImGui::Unindent();
-                            ImGui::TreePop();
+                            ImGui::TreePop(); // Close Level Designer
                         }
-                        g_terrainPanelWasOpen = terrainNodeOpen;
 
                         ImGui::Unindent();
-                        ImGui::TreePop();
+                        ImGui::TreePop(); // Close Objects
                     }
 
-
-                    // Close MENU
-                    ImGui::TreePop();
+                    ImGui::TreePop(); // Close MENU
                 }
 
-                ImGui::End();
-            }
+                if (g_openDeletePopup) { ImGui::OpenPopup("Delete Object?"); g_openDeletePopup = false; }
 
-            if (g_openDeletePopup) { ImGui::OpenPopup("Delete Object?"); g_openDeletePopup = false; }
+                if (ImGui::BeginPopupModal("Delete Object?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    int deleteIdx = -1;
+                    for (int i = 0; i < (int)objects.size(); i++)
+                        if (objects[i].id == g_pendingDeleteId) { deleteIdx = i; break; }
 
-            if (ImGui::BeginPopupModal("Delete Object?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-            {
-                int deleteIdx = -1;
-                for (int i = 0; i < (int)objects.size(); i++)
-                    if (objects[i].id == g_pendingDeleteId) { deleteIdx = i; break; }
+                    if (deleteIdx < 0) { g_pendingDeleteId = -1; ImGui::CloseCurrentPopup(); }
+                    else {
+                        ImGui::Text("Are you sure you want to delete \"%s\" (#%d)?",
+                            objects[deleteIdx].name.c_str(), objects[deleteIdx].id);
+                        ImGui::Spacing();
+                        if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
+                            myTriangle.OnObjectDeleted(g_pendingDeleteId);
+                            objects.erase(objects.begin() + deleteIdx);
+                            if (selectedIndex == deleteIdx)      selectedIndex = -1;
+                            else if (selectedIndex > deleteIdx)  selectedIndex--;
+                            if (g_renamingIndex == deleteIdx)      g_renamingIndex = -1;
+                            else if (g_renamingIndex > deleteIdx)  g_renamingIndex--;
+                            lockedIndex = FindLockedIndex(objects);
+                            g_pendingDeleteId = -1;
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
+                            g_pendingDeleteId = -1; ImGui::CloseCurrentPopup();
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
 
-                if (deleteIdx < 0) { g_pendingDeleteId = -1; ImGui::CloseCurrentPopup(); }
-                else {
-                    ImGui::Text("Are you sure you want to delete \"%s\" (#%d)?",
-                        objects[deleteIdx].name.c_str(), objects[deleteIdx].id);
+                if (g_openTerrainConfirmPopup) { ImGui::OpenPopup("Generate Terrain?"); g_openTerrainConfirmPopup = false; }
+
+                if (ImGui::BeginPopupModal("Generate Terrain?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    ImGui::Text(myTriangle.IsTerrainCommitted()
+                        ? "Apply these changes to the terrain in the scene?"
+                        : "Apply this terrain to the viewport scene?");
                     ImGui::Spacing();
                     if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
-                        myTriangle.OnObjectDeleted(g_pendingDeleteId); // keep terrain tracking in sync
-                        objects.erase(objects.begin() + deleteIdx);
-                        if (selectedIndex == deleteIdx)      selectedIndex = -1;
-                        else if (selectedIndex > deleteIdx)  selectedIndex--;
-                        if (g_renamingIndex == deleteIdx)      g_renamingIndex = -1;
-                        else if (g_renamingIndex > deleteIdx)  g_renamingIndex--;
-                        lockedIndex = FindLockedIndex(objects);
-                        g_pendingDeleteId = -1;
+                        myTriangle.CommitTerrain();
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
-                        g_pendingDeleteId = -1; ImGui::CloseCurrentPopup();
+                        ImGui::CloseCurrentPopup();
                     }
+                    ImGui::EndPopup();
                 }
-                ImGui::EndPopup();
+
+                ImGui::End(); // Close PersistentMenu window
             }
-
-            if (g_openTerrainConfirmPopup) { ImGui::OpenPopup("Generate Terrain?"); g_openTerrainConfirmPopup = false; }
-
-            if (ImGui::BeginPopupModal("Generate Terrain?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-            {
-                ImGui::Text(myTriangle.IsTerrainCommitted()
-                    ? "Apply these changes to the terrain in the scene?"
-                    : "Apply this terrain to the viewport scene?");
-                ImGui::Spacing();
-                if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
-                    myTriangle.CommitTerrain();
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
-            }
-
 
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
         }
 
-
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+       
         // 2b. VIEWPORT MANAGER (right-hand outliner)
         // Lists every object living in the viewport with its unique ID, an
         // editable name, a visibility (eye) toggle and a selection lock.
@@ -1092,4 +1101,4 @@ int main() {
     ImGui::DestroyContext();
     glfwTerminate();
     return 0;
-}
+};

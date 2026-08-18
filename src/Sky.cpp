@@ -63,65 +63,35 @@ void Sky::Draw(
 	const glm::mat4& view,
 	const glm::mat4& projection,
 	const glm::vec3& sunDirection
-)const
-{
-	if (!skyShader)
-		return;
+) const {
+	if (!skyShader) return;
+
+	// 1. Change depth test function so depth 1.0 passes
+	glDepthFunc(GL_LEQUAL);
 
 	skyShader->use();
 
-	// Remive Camera translatioin
-
-	// The sky should follow the camera position 
+	// Remove view translation so sky follows camera
 	glm::mat4 skyView = glm::mat4(glm::mat3(view));
-
 	skyShader->setMat4("view", skyView);
 	skyShader->setMat4("projection", projection);
 
-	skyShader->setVec3("subDirection", sunDirection);
+	// Fix uniform name typo ("sunDirection" instead of "subDirection")
+	skyShader->setVec3("sunDirection", sunDirection);
 
-	skyShader->setFloat(
-		"skyBrightness",
-		settings.skyBrightness
-	);
-
-	skyShader->setFloat(
-		"horizonHaze",
-		settings.horizonHaze
-	);
-
-	skyShader->setFloat(
-		"cloudCoverage",
-		settings.cloudCoverage
-	);
-
-	skyShader->setFloat(
-		"cloudDensity",
-		settings.cloudDensity
-	);
-
-	skyShader->setFloat(
-		"cloudSpeed",
-		settings.cloudSpeed
-	);
-
-	skyShader->setFloat(
-		"cloudHeight",
-		settings.cloudHeight
-	);
-
-	skyShader->setInt(
-		"cloudsEnabled",
-		settings.cloudsEnabled ? 1 : 0
-	);
+	// Set remaining uniforms...
+	skyShader->setFloat("skyBrightness", settings.skyBrightness);
+	skyShader->setFloat("horizonHaze", settings.horizonHaze);
+	skyShader->setFloat("cloudCoverage", settings.cloudCoverage);
+	skyShader->setFloat("cloudDensity", settings.cloudDensity);
+	skyShader->setFloat("cloudSpeed", settings.cloudSpeed);
+	skyShader->setFloat("cloudHeight", settings.cloudHeight);
+	skyShader->setInt("cloudsEnabled", settings.cloudsEnabled ? 1 : 0);
 
 	glBindVertexArray(VAO);
-
-	glDrawArrays(
-		GL_TRIANGLES,
-		0,
-		3
-	);
-
+	glDrawArrays(GL_TRIANGLES, 0, 3);
 	glBindVertexArray(0);
+
+	// 2. Reset depth function back to default for terrain & props
+	glDepthFunc(GL_LESS);
 }

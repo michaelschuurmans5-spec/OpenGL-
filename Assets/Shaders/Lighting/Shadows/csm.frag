@@ -1,3 +1,6 @@
 #version 330 core
-// Fragment depth is automatically written to depth buffer
-void main() {}
+
+void main()
+{
+    // Depth auto-written to the selected gl_Layer[cite: 11, 12]
+}
