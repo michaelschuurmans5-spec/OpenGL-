@@ -72,6 +72,7 @@ struct LightSettings {
     float shadowBiasMin = 0.0005f;
     float shadowBiasMax = 0.005f;
     bool debugCascades = false;
+	float timeOfDay = 12.0f; // 24 hour clock
 };
 
 class Sky;
@@ -82,9 +83,8 @@ public:
     ~Triangle();
 
     void Draw(const glm::mat4& viewMatrix, const glm::mat4& projectionMatrix, const glm::vec3& lightPos, const glm::vec3& cameraPos) const;
-
-    // Fixed Signatures
-    void RenderCSMShadowPass(const glm::vec3& cameraPos, const glm::vec3& cameraFront);
+   
+    void RenderCSMShadowPass(const glm::vec3& cameraPos, const glm::vec3& cameraFront, float aspect, float fovDeg, float nearPlane, float farPlane);
     void DrawGBuffer(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& cameraPos);
     void DrawLightHelpers(const glm::mat4& view, const glm::mat4& projection);
 
@@ -126,10 +126,10 @@ public:
 
 private:
     void LoadPropModels();
-    void DrawPropsInstanced(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& sunDir, const glm::vec3& cameraPos) const;
     void DrawObjectMesh(const GameObject& obj);
     unsigned int LoadTexture(const std::string& path);
     void LoadTextureLibrary();
+    void DrawPropsInstanced(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& sunDir, const glm::vec3& cameraPos) const;
 
     unsigned int VAO = 0, VBO = 0, EBO = 0;
     unsigned int lightVAO = 0;

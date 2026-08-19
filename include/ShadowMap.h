@@ -12,19 +12,19 @@
 
 class ShadowMap {
 public:
-	unsigned int fbo = 0;
-	unsigned int depthArrayTexture = 0;
-	
+    unsigned int fbo = 0;
+    unsigned int depthArrayTexture = 0;
 
-	unsigned int shadowResolution = 2048;
-	std::vector<float> cascadeSplits;
-	std::vector<glm::mat4> shadowMatrices;
 
-	// Create 2D Array Texture for 4 shadow cascades
-	void Init(unsigned int cascadeCount = 4) {
-		glGenFramebuffers(1, &fbo);
+    unsigned int shadowResolution = 2048;
+    std::vector<float> cascadeSplits;
+    std::vector<glm::mat4> shadowMatrices;
 
-		glGenTextures(1, &depthArrayTexture);
+    // Create 2D Array Texture for 4 shadow cascades
+    void Init(unsigned int cascadeCount = 4) {
+        glGenFramebuffers(1, &fbo);
+
+        glGenTextures(1, &depthArrayTexture);
         glBindTexture(GL_TEXTURE_2D_ARRAY, depthArrayTexture);
         glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F,
             shadowResolution, shadowResolution, cascadeCount,
@@ -84,11 +84,14 @@ private:
         float fovDeg, float aspect,
         const glm::vec3& lightDir, const glm::mat4& viewMatrix)
     {
+        // 1. Calculate perspective projection for current cascade split
         glm::mat4 proj = glm::perspective(glm::radians(fovDeg), aspect, prevSplit, nextSplit);
-        glm::mat4 invVP = glm::inverse(proj * viewMatrix);
 
-        // 8 corners of sub-frustum in world space
+        // 2. Obtain world-space frustum corners
+        glm::mat4 invVP = glm::inverse(proj * viewMatrix);
         std::vector<glm::vec4> corners;
+        corners.reserve(8);
+
         for (unsigned int x = 0; x < 2; ++x) {
             for (unsigned int y = 0; y < 2; ++y) {
                 for (unsigned int z = 0; z < 2; ++z) {
@@ -103,29 +106,47 @@ private:
             }
         }
 
+        // 3. Compute geometric center
         glm::vec3 center(0.0f);
-        for (const auto& v : corners) center += glm::vec3(v);
+        for (const auto& v : corners) {
+            center += glm::vec3(v);
+        }
         center /= static_cast<float>(corners.size());
 
-        glm::mat4 lightView = glm::lookAt(center - lightDir, center, glm::vec3(0.0f, 1.0f, 0.0f));
-
-        float minX = std::numeric_limits<float>::max(), maxX = std::numeric_limits<float>::lowest();
-        float minY = std::numeric_limits<float>::max(), maxY = std::numeric_limits<float>::lowest();
-        float minZ = std::numeric_limits<float>::max(), maxZ = std::numeric_limits<float>::lowest();
-
+        // 4. Calculate bounding sphere radius (rotation-invariant)
+        float radius = 0.0f;
         for (const auto& v : corners) {
-            glm::vec4 tr = lightView * v;
-            minX = std::min(minX, tr.x); maxX = std::max(maxX, tr.x);
-            minY = std::min(minY, tr.y); maxY = std::max(maxY, tr.y);
-            minZ = std::min(minZ, tr.z); maxZ = std::max(maxZ, tr.z);
+            float distance = glm::length(glm::vec3(v) - center);
+            radius = std::max(radius, distance);
+        }
+        radius = std::ceil(radius * 16.0f) / 16.0f;
+
+        // 5. Build directional light view matrix
+        glm::vec3 normalizedLightDir = glm::normalize(lightDir);
+        glm::vec3 upVector = glm::vec3(0.0f, 1.0f, 0.0f);
+        if (std::abs(glm::dot(normalizedLightDir, upVector)) > 0.99f) {
+            upVector = glm::vec3(0.0f, 0.0f, 1.0f);
         }
 
-        // Pull back near plane to capture shadow casters outside view frustum
-        constexpr float zMult = 10.0f;
-        if (minZ < 0) minZ *= zMult; else minZ /= zMult;
-        if (maxZ < 0) maxZ /= zMult; else maxZ *= zMult;
+        // Set origin far enough back to catch shadow casters outside the immediate view frustum
+        glm::mat4 lightView = glm::lookAt(center - normalizedLightDir * radius, center, upVector);
 
-        glm::mat4 lightOrtho = glm::ortho(minX, maxX, minY, maxY, minZ, maxZ);
+        // 6. Extend Near/Far Z-bounds to prevent near-plane shadow clipping
+        float zBufferPadding = 200.0f;
+        glm::mat4 lightOrtho = glm::ortho(-radius, radius, -radius, radius, -zBufferPadding, radius + zBufferPadding);
+
+        // 7. Apply Texel Snapping to eliminate shimmering edges
+        glm::mat4 shadowMatrix = lightOrtho * lightView;
+        glm::vec4 shadowOrigin = shadowMatrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+        shadowOrigin *= (static_cast<float>(shadowResolution) / 2.0f);
+
+        glm::vec4 roundedOrigin = glm::round(shadowOrigin);
+        glm::vec4 roundOffset = (roundedOrigin - shadowOrigin) * (2.0f / static_cast<float>(shadowResolution));
+        roundOffset.z = 0.0f;
+        roundOffset.w = 0.0f;
+
+        lightOrtho = glm::translate(glm::mat4(1.0f), glm::vec3(roundOffset)) * lightOrtho;
+
         shadowMatrices[index] = lightOrtho * lightView;
     }
 };

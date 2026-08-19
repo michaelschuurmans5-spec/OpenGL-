@@ -312,7 +312,11 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         float x = (2.0f * (float)xpos) / SCR_WIDTH - 1.0f;
         float y = 1.0f - (2.0f * (float)ypos) / SCR_HEIGHT;
 
-        glm::mat4 projection = glm::perspective(glm::radians(static_cast<float>(camera.Zoom)), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
+        glm::mat4 projection = glm::perspective(
+            glm::radians(static_cast<float>(camera.Zoom)), 
+            (float)SCR_WIDTH / (float)SCR_HEIGHT,
+            0.1f, 
+            100.0f);
         glm::mat4 view = camera.GetViewMatrix();
 
         glm::mat4 invProj = glm::inverse(projection);
@@ -492,21 +496,23 @@ int main() {
         ImGuizmo::BeginFrame();
 
         // --- CAMERA & LIGHT MATRICES ---
+        // --- CAMERA & LIGHT MATRICES ---
+        float aspect = (float)SCR_WIDTH / (float)SCR_HEIGHT;
+        float fov = static_cast<float>(camera.Zoom);
+        float nearPlane = 0.1f;
+        float farPlane = 100.0f;
+
         glm::mat4 view = camera.GetViewMatrix();
-        glm::mat4 projection = glm::perspective(
-            glm::radians(static_cast<float>(camera.Zoom)),
-            (float)SCR_WIDTH / (float)SCR_HEIGHT,
-            0.1f,
-            100.0f);
+        glm::mat4 projection = glm::perspective(glm::radians(fov), aspect, nearPlane, farPlane);
 
         // =================================================================
         // PASS 0: CSM DEPTH PASS
         // =================================================================
-        myTriangle.RenderCSMShadowPass(camera.Position, camera.Front);
+        myTriangle.RenderCSMShadowPass(camera.Position, camera.Front, aspect, fov, nearPlane, farPlane);
 
         // =========================================================================
-         // PASS 1: GEOMETRY PASS (Render Scene to G-Buffer)
-         // =========================================================================
+        // PASS 1: GEOMETRY PASS (Render Scene to G-Buffer)
+        // =========================================================================
         glBindFramebuffer(GL_FRAMEBUFFER, gBuffer.GetFBO()); // Target offscreen G-Buffer FBO
         gBuffer.BindForWriting();
         glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
@@ -532,6 +538,20 @@ int main() {
         deferredSunShader->use();
         deferredSunShader->setVec3("dirLightDir", myTriangle.GetSunDirection());
         deferredSunShader->setVec3("dirLightColor", glm::vec3(1.0f, 0.95f, 0.85f));
+
+        deferredSunShader->setMat4("view", view);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, myTriangle.shadowMap->depthArrayTexture);
+        deferredSunShader->setInt("shadowMapArray", 3);
+        for (size_t i = 0; i < myTriangle.shadowMap->shadowMatrices.size(); ++i) {
+            deferredSunShader->setMat4("shadowMatrices[" + std::to_string(i) + "]", myTriangle.shadowMap->shadowMatrices[i]);
+            deferredSunShader->setFloat("cascadeSplits[" + std::to_string(i) + "]", myTriangle.shadowMap->cascadeSplits[i]);
+        }
+
+        deferredSunShader->setFloat("shadowBiasMin", myTriangle.lightSettings.shadowBiasMin);
+        deferredSunShader->setFloat("shadowBiasMax", myTriangle.lightSettings.shadowBiasMax);
+        deferredSunShader->setFloat("sunIntensity", myTriangle.lightSettings.sunIntensity);
+        deferredSunShader->setFloat("ambientIntensity", myTriangle.lightSettings.ambientIntensity);
         deferredSunShader->setVec3("viewPos", camera.Position);
 
         // Bind G-Buffer Samplers
@@ -543,34 +563,9 @@ int main() {
         // Render Full-Screen Quad
         RenderScreenQuad();
 
-        // =========================================================================
-        // PASS 2: DEFERRED LIGHTING & SKY PASS
-        // =========================================================================
-
-        glBindFramebuffer(GL_FRAMEBUFFER, 0); // Target default backbuffer
-        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
         // --- 1. Run Global Deferred Lighting Quad ---
         // IMPORTANT: Disable depth test so the full-screen quad ALWAYS renders!
         glDisable(GL_DEPTH_TEST);
-
-        deferredSunShader->use();
-
-        // Pass actual lighting parameters from your UI/Sky settings
-        deferredSunShader->setVec3("dirLightDir", myTriangle.GetSunDirection());
-        deferredSunShader->setVec3("dirLightColor", glm::vec3(1.0f, 0.95f, 0.85f));
-        deferredSunShader->setVec3("viewPos", camera.Position);
-
-        // Bind G-Buffer Samplers
-        gBuffer.BindForReading(); // Unit 0: Pos, Unit 1: Normal, Unit 2: Albedo
-        deferredSunShader->setInt("gPosition", 0);
-        deferredSunShader->setInt("gNormal", 1);
-        deferredSunShader->setInt("gAlbedoSpec", 2);
-
-        // Render Full-Screen Quad here (e.g., renderQuad() or myTriangle.DrawQuad())
-        RenderScreenQuad();
 
         // --- 2. Copy G-Buffer Depth to Default Framebuffer (for Sky/Forward Pass) ---
         glBindFramebuffer(GL_READ_FRAMEBUFFER, gBuffer.GetFBO());
@@ -880,6 +875,13 @@ int main() {
                             ImGui::TextDisabled("Sun Direction");
                             ImGui::SliderFloat("Azimuth", &myTriangle.lightSettings.sunAzimuth, 0.0f, 360.0f, "%.1f deg");
                             ImGui::SliderFloat("Elevation", &myTriangle.lightSettings.sunElevation, 2.0f, 89.0f, "%.1f deg");
+
+                            if (ImGui::SliderFloat("Time of Day", &myTriangle.lightSettings.timeOfDay, 0.0f, 24.0f, "%.1f h")) {
+                                float t = myTriangle.lightSettings.timeOfDay;
+                                float dayFrac = (t - 6.0f) / 12.0f; // 0 at 6am sunrise, 1 at 6pm sunset
+                                myTriangle.lightSettings.sunElevation = glm::clamp(sinf(glm::pi<float>() * dayFrac) * 85.0f + 2.0f, 2.0f, 89.0f);
+                                myTriangle.lightSettings.sunAzimuth = 90.0f + dayFrac * 180.0f; // sweeps east -> west
+                            }
 
                             ImGui::Spacing();
                             ImGui::TextDisabled("Light Properties");

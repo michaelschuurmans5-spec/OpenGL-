@@ -545,6 +545,15 @@ Triangle::Triangle() {
 		"Assets/Shaders/Shapes/LightCube.frag"
 	);
 
+	shadowMap = new ShadowMap();
+	shadowMap->Init(); 
+
+	csmShader = new Shader(
+		"Assets/Shaders/Lighting/Shadows/csm.vert",
+		"Assets/Shaders/Lighting/Shadows/csm.frag",
+		"Assets/Shaders/Lighting/Shadows/csm.geom"
+	);
+
 	sky = new Sky();
 
 	propShader = new Shader(
@@ -797,12 +806,10 @@ void Triangle::LoadTextureLibrary() {
 	}
 }
 
-void Triangle::DrawPropsInstanced(
-	const glm::mat4& view,
-	const glm::mat4& projection,
-	const glm::vec3& sunDir,
-	const glm::vec3& cameraPos) const
-{
+void Triangle::DrawPropsInstanced(const glm::mat4& view,
+	const glm::mat4& projection, const glm::vec3& sunDir,
+	const glm::vec3& cameraPos) const {
+
 	std::unordered_map<std::string, std::vector<glm::mat4>> groups;
 
 	for (const auto& obj : sceneObjects)
@@ -816,32 +823,63 @@ void Triangle::DrawPropsInstanced(
 	if (groups.empty())
 		return;
 
-	// Use your existing propShader member variable
 	if (!propShader) return;
 
 	propShader->use();
 	propShader->setMat4("view", view);
 	propShader->setMat4("projection", projection);
+	propShader->setVec3("viewPos", cameraPos);
+
+	// Pass standard lighting direction and color values to the prop shader
+	propShader->setVec3("mainSunDir", glm::normalize(sunDir));
+	propShader->setVec3("lightColor", lightSettings.sunColor * lightSettings.sunIntensity);
+	propShader->setFloat("ambientIntensity", lightSettings.ambientIntensity);
 
 	// Direct diffuse texture sampler to Texture Unit 0
 	propShader->setInt("texture_diffuse1", 0);
 
+	// Upload all CSM shadow mapping data to the prop shader!
+	if (shadowMap) {
+		// Bind your shadow array texture to Unit 5, matching your basic geometry setup
+		glActiveTexture(GL_TEXTURE5);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, shadowMap->depthArrayTexture);
+		propShader->setInt("shadowMapArray", 5);
+
+		// Upload the cascade data arrays
+		for (size_t i = 0; i < shadowMap->cascadeSplits.size(); ++i) {
+			std::string splitUniform = "cascadeSplits[" + std::to_string(i) + "]";
+			std::string matrixUniform = "shadowMatrices[" + std::to_string(i) + "]";
+
+			propShader->setFloat(splitUniform, shadowMap->cascadeSplits[i]);
+			propShader->setMat4(matrixUniform, shadowMap->shadowMatrices[i]);
+		}
+
+		// Pass fine-tuning parameters
+		propShader->setFloat("shadowBiasMin", lightSettings.shadowBiasMin);
+		propShader->setFloat("shadowBiasMax", lightSettings.shadowBiasMax);
+		propShader->setBool("debugCascades", lightSettings.debugCascades);
+	}
+
+	// Draw the models
 	for (const auto& [modelName, transforms] : groups)
 	{
 		auto modelIt = propModels.find(modelName);
-
-		if (modelIt == propModels.end())
-			continue;
-
-		if (!modelIt->second->IsLoaded())
-			continue;
+		if (modelIt == propModels.end()) continue;
+		if (!modelIt->second->IsLoaded()) continue;
 
 		modelIt->second->DrawInstanced(
 			*propShader,
 			transforms
 		);
 	}
+
+	// Clean up bound textures safely when finished
+	glActiveTexture(GL_TEXTURE5);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
 }
+
 
 void Triangle::SpawnProp(
 	const std::string& modelName,
@@ -1066,28 +1104,44 @@ void Triangle::DrawObjectMesh(const GameObject& obj) {
 }
 
 // 2. CSM Shadow Pass Implementation
-void Triangle::RenderCSMShadowPass(const glm::vec3& cameraPos, const glm::vec3& cameraFront) {
+void Triangle::RenderCSMShadowPass(const glm::vec3& cameraPos, const glm::vec3& cameraFront, float aspect, float fovDeg, float nearPlane, float farPlane) {
 	if (!shadowMap || !csmShader) return;
 
 	glm::vec3 activeSunDir = GetSunDirection();
 	glm::mat4 dummyView = glm::lookAt(cameraPos, cameraPos + cameraFront, glm::vec3(0.0f, 1.0f, 0.0f));
 
-	shadowMap->UpdateCascades(0.1f, 500.0f, 45.0f, 1.0f, activeSunDir, dummyView);
+	shadowMap->UpdateCascades(nearPlane, farPlane, fovDeg, aspect, activeSunDir, dummyView);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glCullFace(GL_BACK);
+	glBindFramebuffer(GL_FRAMEBUFFER, shadowMap->fbo);
+	glViewport(0, 0, shadowMap->shadowResolution, shadowMap->shadowResolution);
+	glClear(GL_DEPTH_BUFFER_BIT);
+
+	glEnable(GL_DEPTH_TEST);
+	glCullFace(GL_FRONT);
 
 	csmShader->use();
 	for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
-		csmShader->setMat4("lightSpaceMatrices[" + std::to_string(i) + "]", shadowMap->shadowMatrices[i]);
+		csmShader->setMat4("shadowMatrices[" + std::to_string(i) + "]", shadowMap->shadowMatrices[i]);
 	}
 
 	for (const auto& obj : sceneObjects) {
 		if (!obj.visible || obj.type == ObjectType::Light || obj.type == ObjectType::Prop) continue;
 		csmShader->setMat4("model", obj.transformMatrix);
+		csmShader->setBool("isInstanced", false);
 		DrawObjectMesh(obj);
 	}
 
+	if (terrainObjectId == -1 && terrainVAO != 0 && terrainIndexCount > 0) {
+		glm::mat4 identityModel = glm::mat4(1.0f);
+		csmShader->setMat4("model", identityModel);
+		csmShader->setBool("isInstanced", false);
+
+		glBindVertexArray(terrainVAO);
+		glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+		glBindVertexArray(0);
+	}
+
+	glCullFace(GL_BACK);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -1155,6 +1209,7 @@ Triangle::~Triangle() {
 	delete csmShader;
 	delete sky;
 	delete propShader;
+	delete shadowMap;
 	
 	// Delete Containers
 	glDeleteVertexArrays(1, &VAO);
@@ -1245,90 +1300,76 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 		);
 
 		if (!shadowMap->shadowMatrices.empty()) {
-			// 1. Bind Shadow Framebuffer
 			glBindFramebuffer(GL_FRAMEBUFFER, shadowMap->fbo);
 			glViewport(0, 0, shadowMap->shadowResolution, shadowMap->shadowResolution);
 			glEnable(GL_DEPTH_TEST);
 			glDepthMask(GL_TRUE);
-			glClear(GL_DEPTH_BUFFER_BIT);
-
-			// Disable face culling for the entire depth pass to avoid front/back-face shadow acne
-			glDisable(GL_CULL_FACE);
+			glDisable(GL_CULL_FACE); // Avoid shadow acne front-clipping
 
 			csmShader->use();
-
-			for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
-				std::string uniformName = "shadowMatrices[" + std::to_string(i) + "]";
-				csmShader->setMat4(uniformName, shadowMap->shadowMatrices[i]);
-			}
-
 			int csmModelLoc = glGetUniformLocation(csmShader->ID, "model");
 
-			// 2. Draw Basic Shapes & Ground Geometry into CSM Depth
-			for (const auto& obj : sceneObjects) {
-				if (!obj.visible || obj.type == ObjectType::Light || obj.type == ObjectType::Prop) continue;
+			// FIX: Render geometry into each cascade slice array layer individually!
+			for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
+				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowMap->depthArrayTexture, 0, static_cast<GLint>(i));
+				glClear(GL_DEPTH_BUFFER_BIT);
 
-				glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(obj.transformMatrix));
+				std::string uniformName = "shadowMatrices[" + std::to_string(i) + "]";
+				csmShader->setMat4(uniformName, shadowMap->shadowMatrices[i]);
 
-				if (obj.type == ObjectType::Ground) {
-					glBindVertexArray(groundVAO);
-					glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-				}
-				else {
-					switch (obj.type) {
-					case ObjectType::Sphere:
-						glBindVertexArray(sphereVAO);
-						glDrawElements(GL_TRIANGLES, sphereIndexCount, GL_UNSIGNED_INT, 0);
-						break;
-					case ObjectType::Cylinder:
-						glBindVertexArray(cylinderVAO);
-						glDrawElements(GL_TRIANGLES, cylinderIndexCount, GL_UNSIGNED_INT, 0);
-						break;
-					case ObjectType::Plane:
-						glBindVertexArray(planeVAO);
+				// Render Standalone Shapes into current layer
+				for (const auto& obj : sceneObjects) {
+					if (!obj.visible || obj.type == ObjectType::Light || obj.type == ObjectType::Prop) continue;
+
+					glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(obj.transformMatrix));
+
+					if (obj.type == ObjectType::Ground) {
+						glBindVertexArray(groundVAO);
 						glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-						break;
-					case ObjectType::Prism:
-						glBindVertexArray(prismVAO);
-						glDrawElements(GL_TRIANGLES, prismIndexCount, GL_UNSIGNED_INT, 0);
-						break;
-					case ObjectType::Terrain:
-						glBindVertexArray(terrainVAO);
-						glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
-						break;
-					case ObjectType::Cube:
-					default:
-						glBindVertexArray(VAO);
-						glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
-						break;
+					}
+					else {
+						switch (obj.type) {
+						case ObjectType::Sphere:
+							glBindVertexArray(sphereVAO); glDrawElements(GL_TRIANGLES, sphereIndexCount, GL_UNSIGNED_INT, 0); break;
+						case ObjectType::Cylinder:
+							glBindVertexArray(cylinderVAO); glDrawElements(GL_TRIANGLES, cylinderIndexCount, GL_UNSIGNED_INT, 0); break;
+						case ObjectType::Plane:
+							glBindVertexArray(planeVAO); glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0); break;
+						case ObjectType::Prism:
+							glBindVertexArray(prismVAO); glDrawElements(GL_TRIANGLES, prismIndexCount, GL_UNSIGNED_INT, 0); break;
+						case ObjectType::Terrain:
+							glBindVertexArray(terrainVAO); glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0); break;
+						case ObjectType::Cube:
+						default:
+							glBindVertexArray(VAO); glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0); break;
+						}
 					}
 				}
-			}
 
-			// 3. Draw Depth for Terrain Preview
-			if (terrainObjectId == -1 && terrainIndexCount > 0) {
-				glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
-				glBindVertexArray(terrainVAO);
-				glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
-			}
-
-			// 4. Draw FBX Instanced Props into CSM Depth
-			std::unordered_map<std::string, std::vector<glm::mat4>> propGroups;
-			for (const auto& obj : sceneObjects) {
-				if (obj.visible && obj.type == ObjectType::Prop) {
-					propGroups[obj.modelName].push_back(obj.transformMatrix);
+				// Render Terrain Preview into current layer
+				if (terrainObjectId == -1 && terrainIndexCount > 0) {
+					glUniformMatrix4fv(csmModelLoc, 1, GL_FALSE, glm::value_ptr(glm::mat4(1.0f)));
+					glBindVertexArray(terrainVAO);
+					glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
 				}
-			}
 
-			for (const auto& [modelName, transforms] : propGroups) {
-				auto modelIt = propModels.find(modelName);
-				if (modelIt != propModels.end() && modelIt->second->IsLoaded()) {
-					modelIt->second->DrawInstanced(*csmShader, transforms);
+				// Render Instanced Props into current layer
+				std::unordered_map<std::string, std::vector<glm::mat4>> propGroups;
+				for (const auto& obj : sceneObjects) {
+					if (obj.visible && obj.type == ObjectType::Prop) {
+						propGroups[obj.modelName].push_back(obj.transformMatrix);
+					}
 				}
-			}
+				for (const auto& [modelName, transforms] : propGroups) {
+					auto modelIt = propModels.find(modelName);
+					if (modelIt != propModels.end() && modelIt->second->IsLoaded()) {
+						modelIt->second->DrawInstanced(*csmShader, transforms);
+					}
+				}
+			} // Layer rendering loop block ends here
 
-			// Restore Culling State after Depth Pass
 			glEnable(GL_CULL_FACE);
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		}
 	}
 
@@ -1370,14 +1411,13 @@ void Triangle::Draw(const glm::mat4& viewMatrix,
 	// Calculate active light direction from ImGui angles
 	glm::vec3 activeSunDir = GetSunDirection();
 
-	// Update positions list (Position 0 represents the primary directional light direction projected into world space)
+	glm::vec3 worldSunOrigin = glm::vec3(0.0f, 0.0f, 0.0f) + activeSunDir * 200.0f;
+
 	if (activeLightPositions.empty()) {
-		// If no light objects exist, push the primary sun light position as element 0
-		activeLightPositions.push_back(cameraPos + activeSunDir * 100.0f);
+		activeLightPositions.push_back(worldSunOrigin);
 	}
 	else {
-		// Overwrite the first light object's position with the active sun position
-		activeLightPositions[0] = cameraPos + activeSunDir * 100.0f;
+		activeLightPositions[0] = worldSunOrigin;
 	}
 
 	myShader->use();
