@@ -1,6 +1,6 @@
 #include "Triangle.h"
-#include "stb_image.h"
 #include "Sky.h"
+#include "stb_image.h"
 #include "Model.h"
 
 // Standard C++ 
@@ -530,21 +530,19 @@ namespace {
 
 Triangle::Triangle() {
 
-	// Shader loading and compiling 
 	myShader = new Shader(
 		"Assets/Shaders/Shapes/Triangle.vert",
 		"Assets/Shaders/Shapes/Triangle.frag"
 	);
 
+	gShapeShader = new Shader(
+		"Assets/Shaders/Shapes/GBufferShape.vert",
+		"Assets/Shaders/Shapes/GBufferShape.frag"
+	);
+
 	lightCubeShader = new Shader(
 		"Assets/Shaders/Shapes/LightCube.vert",
 		"Assets/Shaders/Shapes/LightCube.frag"
-	);
-
-	csmShader = new Shader(
-		"Assets/Shaders/Lighting/Shadows/csm.vert",
-		"Assets/Shaders/Lighting/Shadows/csm.frag",
-		"Assets/Shaders/Lighting/Shadows/csm.geom"
 	);
 
 	sky = new Sky();
@@ -741,60 +739,27 @@ void Triangle::SpawnCube(const glm::vec3& spawnPosition) {
 	sceneObjects.push_back(cube);
 }
 
-void Triangle::LoadPropModels()
-{
-	const std::vector<std::string> propNames =
-	{
-		"Rock01",
-		"Bush01",
-		"Tree01"
-	};
+void Triangle::LoadPropModels() {
+	const std::vector<std::string> propNames = { "Rock01", "Bush01", "Tree01" };
 
-	for (const auto& name : propNames)
-	{
-		std::string path =
-			"Assets/Models/Props/" +
-			name +
-			"/" +
-			name +
-			".fbx";
+	for (const auto& name : propNames) {
+		std::string path = "Assets/Models/Props/" + name + "/" + name + ".fbx";
 
 		std::ifstream test(path);
+		if (!test.good()) continue;
 
-		if (!test.good())
-		{
-			std::cout
-				<< "LoadPropModels: skipping "
-				<< name
-				<< " - no file at "
-				<< path
-				<< " yet."
-				<< std::endl;
-
-			continue;
-		}
-
-		// Create the Model directly on the heap.
+		// Create the unique pointer
 		auto model = std::make_unique<Model>(path);
 
-		if (!model->IsLoaded())
-		{
-			std::cout
-				<< "LoadPropModels: "
-				<< name
-				<< " failed to load."
-				<< std::endl;
-
+		// Check if loaded using the unique_ptr before moving it into the map
+		if (!model || !model->IsLoaded()) {
+			std::cout << "LoadPropModels: " << name << " failed to load." << std::endl;
 			continue;
 		}
 
-		// Store ownership in propModels.
+		// Only move model into the map ONCE you are completely done with it
 		propModels[name] = std::move(model);
-
-		std::cout
-			<< "LoadPropModels: loaded "
-			<< name
-			<< std::endl;
+		std::cout << "LoadPropModels: Loaded " << name << std::endl;
 	}
 }
 
@@ -842,7 +807,7 @@ void Triangle::DrawPropsInstanced(
 
 	for (const auto& obj : sceneObjects)
 	{
-		if (obj.type != ObjectType::Prop)
+		if (obj.type != ObjectType::Prop || !obj.visible)
 			continue;
 
 		groups[obj.modelName].push_back(obj.transformMatrix);
@@ -851,12 +816,15 @@ void Triangle::DrawPropsInstanced(
 	if (groups.empty())
 		return;
 
-	propShader->use();
+	// Use your existing propShader member variable
+	if (!propShader) return;
 
+	propShader->use();
 	propShader->setMat4("view", view);
 	propShader->setMat4("projection", projection);
-	propShader->setVec3("sunDirection", sunDir);
-	propShader->setVec3("viewPos", cameraPos);
+
+	// Direct diffuse texture sampler to Texture Unit 0
+	propShader->setInt("texture_diffuse1", 0);
 
 	for (const auto& [modelName, transforms] : groups)
 	{
@@ -885,6 +853,7 @@ void Triangle::SpawnProp(
 	GameObject obj{};
 
 	obj.type = ObjectType::Prop;
+	obj.visible = true;
 	obj.isBasicShape = false;
 	obj.modelName = modelName;
 	obj.position = spawnPosition;
@@ -924,8 +893,9 @@ void Triangle::SpawnShape(ObjectType type, const glm::vec3& spawnPosition, const
 		: customName;
 	nextCubeID++;
 
-	GameObject obj{};
+	GameObject obj;
 	obj.type = type;
+	obj.visible = true;
 	obj.position = spawnPosition;
 	obj.scale = glm::vec3(1.0f);
 	obj.name = name;
@@ -957,8 +927,9 @@ void Triangle::CommitTerrain() {
 	if (terrainIndexCount == 0) return; // nothing generated yet - Generate has no effect
 	if (terrainObjectId != -1) return;  // already committed, nothing further to add
 
-	GameObject obj{};
+	GameObject obj;
 	obj.type = ObjectType::Terrain;
+	obj.visible = true;
 	obj.position = glm::vec3(0.0f);
 	obj.scale = glm::vec3(1.0f);
 	obj.name = "Terrain";
@@ -1060,9 +1031,126 @@ void Triangle::SpawnLight(const glm::vec3& spawnPosition) {
 	sceneObjects.push_back(light);
 }
 
+// 1. Mesh Rendering Helper
+void Triangle::DrawObjectMesh(const GameObject& obj) {
+	switch (obj.type) {
+	case ObjectType::Sphere:
+		glBindVertexArray(sphereVAO);
+		glDrawElements(GL_TRIANGLES, sphereIndexCount, GL_UNSIGNED_INT, 0);
+		break;
+	case ObjectType::Cylinder:
+		glBindVertexArray(cylinderVAO);
+		glDrawElements(GL_TRIANGLES, cylinderIndexCount, GL_UNSIGNED_INT, 0);
+		break;
+	case ObjectType::Plane:
+		glBindVertexArray(planeVAO);
+		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+		break;
+	case ObjectType::Prism:
+		glBindVertexArray(prismVAO);
+		glDrawElements(GL_TRIANGLES, prismIndexCount, GL_UNSIGNED_INT, 0);
+		break;
+	case ObjectType::Terrain:
+		glBindVertexArray(terrainVAO);
+		glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+		break;
+	case ObjectType::Cube:
+	case ObjectType::Ground:
+	default:
+		glBindVertexArray(VAO);
+		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+		break;
+	}
+
+	glBindVertexArray(0);
+}
+
+// 2. CSM Shadow Pass Implementation
+void Triangle::RenderCSMShadowPass(const glm::vec3& cameraPos, const glm::vec3& cameraFront) {
+	if (!shadowMap || !csmShader) return;
+
+	glm::vec3 activeSunDir = GetSunDirection();
+	glm::mat4 dummyView = glm::lookAt(cameraPos, cameraPos + cameraFront, glm::vec3(0.0f, 1.0f, 0.0f));
+
+	shadowMap->UpdateCascades(0.1f, 500.0f, 45.0f, 1.0f, activeSunDir, dummyView);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glCullFace(GL_BACK);
+
+	csmShader->use();
+	for (size_t i = 0; i < shadowMap->shadowMatrices.size(); ++i) {
+		csmShader->setMat4("lightSpaceMatrices[" + std::to_string(i) + "]", shadowMap->shadowMatrices[i]);
+	}
+
+	for (const auto& obj : sceneObjects) {
+		if (!obj.visible || obj.type == ObjectType::Light || obj.type == ObjectType::Prop) continue;
+		csmShader->setMat4("model", obj.transformMatrix);
+		DrawObjectMesh(obj);
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Triangle::DrawGBuffer(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& cameraPos) {
+	if (!gShapeShader) return;
+
+	gShapeShader->use();
+	gShapeShader->setMat4("view", view);
+	gShapeShader->setMat4("projection", projection);
+
+	int modelLoc = glGetUniformLocation(gShapeShader->ID, "model");
+	int colorLoc = glGetUniformLocation(gShapeShader->ID, "objectColor");
+
+	// --- A. Render Basic Shapes & Committed Terrain ---
+	for (const auto& obj : sceneObjects) {
+		if (!obj.visible || obj.type == ObjectType::Light || obj.type == ObjectType::Prop) continue;
+
+		// Ensure model matrix is valid
+		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(obj.transformMatrix));
+		glUniform3f(colorLoc, obj.baseColor.r, obj.baseColor.g, obj.baseColor.b);
+
+		DrawObjectMesh(obj);
+	}
+
+	// --- B. Render Uncommitted Live Preview Terrain ---
+	if (terrainObjectId == -1 && terrainVAO != 0 && terrainIndexCount > 0) {
+		glm::mat4 identityModel = glm::mat4(1.0f);
+		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(identityModel));
+		glUniform3f(colorLoc, 0.35f, 0.55f, 0.25f); // Terrain green
+
+		glBindVertexArray(terrainVAO);
+		glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+		glBindVertexArray(0);
+	}
+
+	// --- C. Render Instanced FBX Props (Rock01) ---
+	DrawPropsInstanced(view, projection, GetSunDirection(), cameraPos);
+}
+
+void Triangle::DrawLightHelpers(const glm::mat4& view, const glm::mat4& projection) {
+	if (!lightCubeShader) return;
+
+	lightCubeShader->use();
+	lightCubeShader->setMat4("view", view);
+	lightCubeShader->setMat4("projection", projection);
+
+	for (const auto& obj : sceneObjects) {
+		if (!obj.visible || obj.type != ObjectType::Light) continue;
+
+		glm::mat4 lightModel = glm::scale(obj.transformMatrix, glm::vec3(0.2f));
+		lightCubeShader->setMat4("model", lightModel);
+
+		glBindVertexArray(lightVAO);
+		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+	}
+	glBindVertexArray(0);
+}
+
+
 Triangle::~Triangle() {
 	// Delete Shaders
 	delete myShader;
+	delete gShapeShader;
 	delete lightCubeShader;
 	delete csmShader;
 	delete sky;

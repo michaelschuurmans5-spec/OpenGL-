@@ -4,17 +4,15 @@
 #include <glm/glm/gtc/matrix_transform.hpp>
 #include <string>
 
-
 // NOTE: Sphere/Plane/Cylinder/Prism are new "basic shape" types for the
 // drag-and-drop workflow. They currently share the Cube's mesh as a
 // placeholder (see Triangle::Draw) until dedicated geometry is added.
 // Terrain is the Level Designer > Terrain Generator's procedural mesh -
 // see Triangle::PreviewTerrain / CommitTerrain / DeleteTerrain.
-enum class ObjectType { Cube, Sphere, Plane, Cylinder, Prism, Light, Ground, Terrain, Prop};
+enum class ObjectType { Cube, Sphere, Plane, Cylinder, Prism, Light, Ground, Terrain, Prop };
 
 // Which loaded texture (if any) a basic shape should be rendered with.
 enum class TextureSlot { None, Container, Grass };
-
 
 // Every GameObject gets a unique, never-reused runtime ID. The Viewport
 // Manager (outliner) uses it as a stable handle so renaming an object never
@@ -25,7 +23,6 @@ inline int NextObjectId() {
 }
 
 struct GameObject {
-
 	// Unique per-instance ID assigned at construction.
 	int id = NextObjectId();
 
@@ -38,9 +35,9 @@ struct GameObject {
 
 	// Viewport Manager state
 	bool visible = true; // eye icon: hidden objects are skipped when rendering
-	bool locked = false; // lock icon: while any object is locked it is the only selectable object
+	bool locked = false;  // lock icon: while any object is locked it is the only selectable object
 
-	// ADD THIS: Persistent matrix initialized to Identity
+	// Persistent matrix initialized to Identity
 	glm::mat4 transformMatrix = glm::mat4(1.0f);
 
 	// Per-object configuration set from the Objects > Shapes panel
@@ -50,7 +47,7 @@ struct GameObject {
 	bool isBasicShape = true; // false is reserved for imported models later
 
 	// Imported model information
-    // Empty for basic shapes; contains the model key/path for Prop objects.
+	// Empty for basic shapes; contains the model key/path for Prop objects.
 	std::string modelName;
 
 	unsigned int textureOverride = 0; // 0 = use the model's own textures
@@ -65,9 +62,8 @@ inline std::string ToString(ObjectType type) {
 	case ObjectType::Prism:    return "Prism";
 	case ObjectType::Light:    return "Light";
 	case ObjectType::Ground:   return "Ground";
-	case ObjectType::Terrain: return "Terrain";
-	case ObjectType::Prop: return "Prop";
-
+	case ObjectType::Terrain:  return "Terrain";
+	case ObjectType::Prop:     return "Prop";
 	}
 	return "Unknown";
 }

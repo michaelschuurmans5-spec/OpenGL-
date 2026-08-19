@@ -19,107 +19,56 @@ uniform float cloudHeight;
 
 uniform int cloudsEnabled;
 
-
 // --------------------------------------------------
 // Convert screen position into a world-space ray.
 // --------------------------------------------------
-
 vec3 GetWorldRay(vec2 uv)
 {
-    vec4 rayClip = vec4(
-        uv * 2.0 - 1.0,
-        1.0,
-        1.0
-    );
+    // Convert UV [0,1] to Clip Space NDC [-1,1]
+    vec4 rayClip = vec4(uv * 2.0 - 1.0, -1.0, 1.0);
 
+    // Transform clip space to view space
     vec4 rayView = inverse(projection) * rayClip;
+    rayView = vec4(rayView.xy, -1.0, 0.0); // Direction vector pointing forward into view space
 
-    rayView = vec4(
-        rayView.xy,
-        1.0,
-        0.0
-    );
-
-    return normalize(
-        mat3(inverse(view)) * rayView.xyz
-    );
+    // Transform view space to world space using inverse view matrix
+    vec3 rayWorld = (inverse(view) * rayView).xyz;
+    
+    return normalize(rayWorld);
 }
-
 
 // --------------------------------------------------
 // Main
 // --------------------------------------------------
-
 void main()
 {
     vec3 ray = GetWorldRay(screenUV);
+    vec3 normSunDir = normalize(sunDirection);
 
-    float sunHeight = max(
-        dot(ray, sunDirection),
-        0.0
-    );
+    // Sun alignment dot product
+    float sunHeight = max(dot(ray, normSunDir), 0.0);
 
-    // Sky colour.
-    vec3 zenithColor = vec3(
-        0.08,
-        0.28,
-        0.60
-    );
+    // Gradient palette
+    vec3 zenithColor  = vec3(0.08, 0.28, 0.60);
+    vec3 horizonColor = vec3(0.65, 0.80, 0.95);
 
-    vec3 horizonColor = vec3(
-        0.65,
-        0.80,
-        0.95
-    );
+    // Gradient factor based on vertical ray direction
+    float horizonFactor = clamp(ray.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 skyColor = mix(horizonColor, zenithColor, horizonFactor);
 
-    float horizon = clamp(
-        ray.y * 0.5 + 0.5,
-        0.0,
-        1.0
-    );
+    // Sun disc and atmospheric glow
+    float sunGlow = pow(sunHeight, 32.0);
+    float sunDisc = pow(sunHeight, 512.0); // Crisp sun core
+    
+    skyColor += vec3(1.0, 0.55, 0.20) * sunGlow * 0.5;
+    skyColor += vec3(1.0, 0.90, 0.70) * sunDisc * 2.0;
 
-    vec3 skyColor = mix(
-        horizonColor,
-        zenithColor,
-        horizon
-    );
+    // Horizon haze blending
+    float haze = 1.0 - smoothstep(0.0, 0.45, abs(ray.y));
+    skyColor = mix(skyColor, horizonColor, haze * horizonHaze * 0.35);
 
-    // ------------------------------------------------
-    // Sun influence
-    // ------------------------------------------------
-
-    float sunGlow = pow(
-        sunHeight,
-        32.0
-    );
-
-    skyColor += vec3(
-        1.0,
-        0.55,
-        0.20
-    ) * sunGlow * 0.5;
-
-    // ------------------------------------------------
-    // Horizon haze
-    // ------------------------------------------------
-
-    float haze = 1.0 -
-        smoothstep(
-            0.0,
-            0.45,
-            abs(ray.y)
-        );
-
-    skyColor = mix(
-        skyColor,
-        horizonColor,
-        haze * horizonHaze * 0.35
-    );
-
+    // Global brightness scale
     skyColor *= skyBrightness;
 
-    FragColor = vec4(
-        skyColor,
-        1.0
-    );
+    FragColor = vec4(skyColor, 1.0);
 }

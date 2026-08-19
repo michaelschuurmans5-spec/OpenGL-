@@ -2,5 +2,5 @@
 
 void main()
 {
-    // Depth auto-written to the selected gl_Layer[cite: 11, 12]
+    // Depth auto-written to the selected gl_Layer
 }

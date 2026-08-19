@@ -1,5 +1,4 @@
-#include "sky.h"
-
+#include "Sky.h"
 
 #include <glad/glad.h>
 #include <glm/glm/glm.hpp>
@@ -8,26 +7,22 @@
 
 Sky::Sky() {
 	skyShader = new Shader(
-		"Assets/Shaders/lighting/Sky/Sky.vert",
+		"Assets/Shaders/Lighting/Sky/Sky.vert",
 		"Assets/Shaders/Lighting/Sky/Sky.frag"
 	);
 
-
 	// Full-Screen triangle 
-
 	float vertices[] =
 	{
 		-1.0f, -1.0f,
-		3.0f, -1.0f,
-		-1.0f, 3.0f
+		 3.0f, -1.0f,
+		-1.0f,  3.0f
 	};
-
 
 	glGenVertexArrays(1, &VAO);
 	glGenBuffers(1, &VBO);
 
 	glBindVertexArray(VAO);
-
 	glBindBuffer(GL_ARRAY_BUFFER, VBO);
 
 	glBufferData(
@@ -38,7 +33,6 @@ Sky::Sky() {
 	);
 
 	glEnableVertexAttribArray(0);
-
 	glVertexAttribPointer(
 		0,
 		2,
@@ -49,14 +43,20 @@ Sky::Sky() {
 	);
 
 	glBindVertexArray(0);
+
+	// Ensure sky settings are initialized to non-zero defaults
+	settings.skyBrightness = 1.0f;
+	settings.horizonHaze = 1.0f;
 }
 
 Sky::~Sky()
 {
 	delete skyShader;
 
-	if (VAO != 0)
+	if (VAO != 0) {
+		glDeleteVertexArrays(1, &VAO);
 		glDeleteBuffers(1, &VBO);
+	}
 }
 
 void Sky::Draw(
@@ -66,20 +66,19 @@ void Sky::Draw(
 ) const {
 	if (!skyShader) return;
 
-	// 1. Change depth test function so depth 1.0 passes
+	// Disable depth writing and set depth function so depth 1.0 passes
+	glDepthMask(GL_FALSE);
 	glDepthFunc(GL_LEQUAL);
 
 	skyShader->use();
 
-	// Remove view translation so sky follows camera
-	glm::mat4 skyView = glm::mat4(glm::mat3(view));
-	skyShader->setMat4("view", skyView);
+	// Pass unmodified view matrix so ray reconstruction works in shader
+	skyShader->setMat4("view", view);
 	skyShader->setMat4("projection", projection);
 
-	// Fix uniform name typo ("sunDirection" instead of "subDirection")
-	skyShader->setVec3("sunDirection", sunDirection);
+	skyShader->setVec3("sunDirection", glm::normalize(sunDirection));
 
-	// Set remaining uniforms...
+	// Set sky uniforms
 	skyShader->setFloat("skyBrightness", settings.skyBrightness);
 	skyShader->setFloat("horizonHaze", settings.horizonHaze);
 	skyShader->setFloat("cloudCoverage", settings.cloudCoverage);
@@ -92,6 +91,7 @@ void Sky::Draw(
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	glBindVertexArray(0);
 
-	// 2. Reset depth function back to default for terrain & props
+	// Restore default depth states
+	glDepthMask(GL_TRUE);
 	glDepthFunc(GL_LESS);
 }

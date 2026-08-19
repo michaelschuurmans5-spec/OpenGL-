@@ -8,6 +8,6 @@ uniform bool isInstanced;
 void main()
 {
     mat4 modelMatrix = isInstanced ? instanceModel : model;
-    // Pass world position into the Geometry Shader[cite: 13]
+    // Pass world position into the Geometry Shader
     gl_Position = modelMatrix * vec4(aPos, 1.0); 
 }

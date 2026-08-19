@@ -1,11 +1,15 @@
 // 1. ALWAYS FIRST: Graphics API function pointers
 #include <glad/glad.h>  
 #include <GLFW/glfw3.h>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/matrix_decompose.hpp>
 
 // 2. Project Headers
 #include "Triangle.h"
 #include "Camera.h"
 #include "TerrainParams.h"
+#include "GBuffer.h"
+#include "Sky.h"
 
 // 3. UI Frameworks
 #include <imgui.h>
@@ -88,6 +92,9 @@ bool showGUI = true;
 int selectedIndex = -1;
 ImGuizmo::OPERATION currentOperation = ImGuizmo::TRANSLATE;
 
+// Engine Render Data
+GBuffer gBuffer;
+
 
 // --- Helper: frame the camera on a world position (shared by the F hotkey
 // and the Viewport Manager's focus button) ---
@@ -155,6 +162,12 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
     SCR_WIDTH = width;
     SCR_HEIGHT = height;
+
+    // Resize G-Buffer attachments to match new screen dimensions
+    if (width > 0 && height > 0) {
+        gBuffer.Resize(width, height);
+    }
+
 }
 
 // Input functions
@@ -339,6 +352,42 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
     camera.ProcessMouseScroll(static_cast<float>(yoffset));
 }
 
+// Global or main-scope declarations
+Shader* deferredSunShader = nullptr;
+// Fullscreen Quad Renderer Helper
+void RenderScreenQuad() {
+    static GLuint quadVAO = 0;
+    static GLuint quadVBO = 0;
+
+    if (quadVAO == 0) {
+        float quadVertices[] = {
+            // positions   // texCoords
+            -1.0f,  1.0f,  0.0f, 1.0f,
+            -1.0f, -1.0f,  0.0f, 0.0f,
+             1.0f, -1.0f,  1.0f, 0.0f,
+
+            -1.0f,  1.0f,  0.0f, 1.0f,
+             1.0f, -1.0f,  1.0f, 0.0f,
+             1.0f,  1.0f,  1.0f, 1.0f
+        };
+
+        glGenVertexArrays(1, &quadVAO);
+        glGenBuffers(1, &quadVBO);
+        glBindVertexArray(quadVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
+
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    }
+
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
 int main() {
     if (!glfwInit()) return -1;
 
@@ -361,6 +410,12 @@ int main() {
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return -1;
 
+    // GBuffer
+    if (!gBuffer.Init(SCR_WIDTH,SCR_HEIGHT)) {
+        std::cerr << "Failed to initialize G-Buffer!" << std::endl;
+        return -1;
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
@@ -373,6 +428,11 @@ int main() {
 
     glEnable(GL_DEPTH_TEST);
     Triangle myTriangle;
+
+    // Initialize Shader Program
+    deferredSunShader = new Shader(
+        "Assets/Shaders/Lighting/DeferredSun/DeferredSun.vert",
+        "Assets/Shaders/Lighting/DeferredSun/DeferredSun.frag");
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
@@ -391,9 +451,7 @@ int main() {
 
         processInput(window, selectedTarget);
 
-
         // --- INLINE HOTKEY 'F' FOCUS HANDLER ---
-        // A locked object owns the selection: force it and ignore everything else.
         int lockedIndex = FindLockedIndex(objects);
         if (lockedIndex >= 0) {
             selectedIndex = lockedIndex;
@@ -427,39 +485,123 @@ int main() {
         }
         xPressedLastFrame = xKeyDown;
 
-
-        // --- Start ImGui frame ---
+        // --- START UI FRAME ---
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
 
-        // --- Clear Buffers ---
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        // --- Calculate Matrices ---
+        // --- CAMERA & LIGHT MATRICES ---
         glm::mat4 view = camera.GetViewMatrix();
         glm::mat4 projection = glm::perspective(
             glm::radians(static_cast<float>(camera.Zoom)),
             (float)SCR_WIDTH / (float)SCR_HEIGHT,
             0.1f,
             100.0f);
-        glm::vec3 lightPos(1.2f, 1.0f, 2.0f);
 
-        // --- 1. RENDER SKY (First) ---
-        // Draw sky before 3D geometry and use GL_LEQUAL depth function
-        glDepthFunc(GL_LEQUAL);
-        myTriangle.sky->Draw(view, projection, lightPos);
-        glDepthFunc(GL_LESS); // Reset back to default depth testing
+        // =================================================================
+        // PASS 0: CSM DEPTH PASS
+        // =================================================================
+        myTriangle.RenderCSMShadowPass(camera.Position, camera.Front);
 
-        // --- 2. RENDER SCENE GEOMETRY (Terrain & Objects) ---
-        myTriangle.Draw(view, projection, lightPos, camera.Position);
+        // =========================================================================
+         // PASS 1: GEOMETRY PASS (Render Scene to G-Buffer)
+         // =========================================================================
+        glBindFramebuffer(GL_FRAMEBUFFER, gBuffer.GetFBO()); // Target offscreen G-Buffer FBO
+        gBuffer.BindForWriting();
+        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
 
-        // --- 3. RAY CASTING & SELECTION ---
+        glDepthMask(GL_TRUE);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+
+        myTriangle.DrawGBuffer(view, projection, camera.Position);
+
+        // =========================================================================
+        // PASS 2: DEFERRED LIGHTING & SKY PASS (Render Quad to Screen)
+        // =========================================================================
+        glBindFramebuffer(GL_FRAMEBUFFER, 0); // Target default backbuffer
+        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // 1. Run Global Deferred Lighting Quad
+        glDisable(GL_DEPTH_TEST);
+
+        deferredSunShader->use();
+        deferredSunShader->setVec3("dirLightDir", myTriangle.GetSunDirection());
+        deferredSunShader->setVec3("dirLightColor", glm::vec3(1.0f, 0.95f, 0.85f));
+        deferredSunShader->setVec3("viewPos", camera.Position);
+
+        // Bind G-Buffer Samplers
+        gBuffer.BindForReading(); // Unit 0: Pos, Unit 1: Normal, Unit 2: Albedo
+        deferredSunShader->setInt("gPosition", 0);
+        deferredSunShader->setInt("gNormal", 1);
+        deferredSunShader->setInt("gAlbedoSpec", 2);
+
+        // Render Full-Screen Quad
+        RenderScreenQuad();
+
+        // =========================================================================
+        // PASS 2: DEFERRED LIGHTING & SKY PASS
+        // =========================================================================
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0); // Target default backbuffer
+        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // --- 1. Run Global Deferred Lighting Quad ---
+        // IMPORTANT: Disable depth test so the full-screen quad ALWAYS renders!
+        glDisable(GL_DEPTH_TEST);
+
+        deferredSunShader->use();
+
+        // Pass actual lighting parameters from your UI/Sky settings
+        deferredSunShader->setVec3("dirLightDir", myTriangle.GetSunDirection());
+        deferredSunShader->setVec3("dirLightColor", glm::vec3(1.0f, 0.95f, 0.85f));
+        deferredSunShader->setVec3("viewPos", camera.Position);
+
+        // Bind G-Buffer Samplers
+        gBuffer.BindForReading(); // Unit 0: Pos, Unit 1: Normal, Unit 2: Albedo
+        deferredSunShader->setInt("gPosition", 0);
+        deferredSunShader->setInt("gNormal", 1);
+        deferredSunShader->setInt("gAlbedoSpec", 2);
+
+        // Render Full-Screen Quad here (e.g., renderQuad() or myTriangle.DrawQuad())
+        RenderScreenQuad();
+
+        // --- 2. Copy G-Buffer Depth to Default Framebuffer (for Sky/Forward Pass) ---
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, gBuffer.GetFBO());
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // Write to default framebuffer
+        
+        // Read from Albedo (Attachment 2)
+        glBlitFramebuffer(
+            0, 0, SCR_WIDTH, SCR_HEIGHT,
+            0, 0, SCR_WIDTH, SCR_HEIGHT,
+            GL_DEPTH_BUFFER_BIT, GL_NEAREST
+        );
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        // --- 3. Render Sky Dome behind geometry ---
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL); // Render sky only where no geometry was drawn
+        if (myTriangle.sky) {
+            myTriangle.sky->Draw(view, projection, myTriangle.GetSunDirection());
+        }
+        glDepthFunc(GL_LESS); // Restore default depth func
+
+        // Render Light Gizmos / Debug Visualizers
+        myTriangle.DrawLightHelpers(view, projection);
+
+        // Ray Casting Selection Logic
         double xpos, ypos;
         glfwGetCursorPos(window, &xpos, &ypos);
-        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS && !ImGuizmo::IsOver() && !ImGui::GetIO().WantCaptureMouse) {
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS 
+            && !ImGuizmo::IsOver()
+            && !ImGuizmo::IsUsing()
+            && !ImGui::GetIO().WantCaptureMouse) {
             float x = (2.0f * (float)xpos) / SCR_WIDTH - 1.0f;
             float y = 1.0f - (2.0f * (float)ypos) / SCR_HEIGHT;
             glm::mat4 invProj = glm::inverse(projection);
@@ -470,9 +612,7 @@ int main() {
             glm::vec3 rayWorld = glm::normalize(glm::vec3(invView * rayEye));
 
             for (int i = 0; i < (int)objects.size(); i++) {
-                // Locked: only the locked object may be picked.
                 if (lockedIndex >= 0 && i != lockedIndex) continue;
-                // Hidden objects are not pickable.
                 if (!objects[i].visible) continue;
 
                 if (RayIntersectsObject(camera.Position, rayWorld, objects[i].position)) {
@@ -510,12 +650,18 @@ int main() {
                             dropMousePos.x, dropMousePos.y,
                             camera, view, projection, SCR_WIDTH, SCR_HEIGHT);
 
+
+                        if (myTriangle.HasTerrainPreview())
+                            dropPos.y = myTriangle.GetTerrainHeightAt(dropPos.x, dropPos.z);
+
                         myTriangle.SpawnShape(
                             droppedType,
                             dropPos,
                             "", // auto-named
                             glm::vec3(1.0f, 0.5f, 0.31f),
                             TextureSlot::None);
+
+
                     }
                     ImGui::EndDragDropTarget();
                 }
@@ -677,7 +823,8 @@ int main() {
                                                 spawnPos,
                                                 spawnName,
                                                 g_pendingShape.baseColor,
-                                                ToTextureSlot(g_pendingShape.textureSlotIndex));
+                                                ToTextureSlot(g_pendingShape.textureSlotIndex)
+                                            );
                                         }
                                     }
                                     ImGui::EndChild();
@@ -701,7 +848,7 @@ int main() {
 
                             bool draggingPropThisFrame = false;
 
-                            for (auto& [name, model] : myTriangle.propModels)
+                            for (auto& [name, model] : myTriangle.GetPropModels())
                             {
                                 if (!model->IsLoaded()) continue;
 
@@ -833,262 +980,208 @@ int main() {
                     ImGui::TreePop(); // Close MENU
                 }
 
-                if (g_openDeletePopup) { ImGui::OpenPopup("Delete Object?"); g_openDeletePopup = false; }
+                if (g_openDeletePopup) {
+                    ImGui::OpenPopup("Delete Object?");
+                    g_openDeletePopup = false;
+                }
 
-                if (ImGui::BeginPopupModal("Delete Object?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-                {
-                    int deleteIdx = -1;
-                    for (int i = 0; i < (int)objects.size(); i++)
-                        if (objects[i].id == g_pendingDeleteId) { deleteIdx = i; break; }
+                if (ImGui::BeginPopupModal("Delete Object?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::Text("Are you sure you want to delete this object?\nThis action cannot be undone.\n\n");
+                    ImGui::Separator();
 
-                    if (deleteIdx < 0) { g_pendingDeleteId = -1; ImGui::CloseCurrentPopup(); }
-                    else {
-                        ImGui::Text("Are you sure you want to delete \"%s\" (#%d)?",
-                            objects[deleteIdx].name.c_str(), objects[deleteIdx].id);
-                        ImGui::Spacing();
-                        if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
+                    if (ImGui::Button("OK", ImVec2(120, 0))) {
+                        if (g_pendingDeleteId != -1) {
                             myTriangle.OnObjectDeleted(g_pendingDeleteId);
-                            objects.erase(objects.begin() + deleteIdx);
-                            if (selectedIndex == deleteIdx)      selectedIndex = -1;
-                            else if (selectedIndex > deleteIdx)  selectedIndex--;
-                            if (g_renamingIndex == deleteIdx)      g_renamingIndex = -1;
-                            else if (g_renamingIndex > deleteIdx)  g_renamingIndex--;
-                            lockedIndex = FindLockedIndex(objects);
+                            for (size_t i = 0; i < objects.size(); ++i) {
+                                if (objects[i].id == g_pendingDeleteId) {
+                                    objects.erase(objects.begin() + i);
+                                    if (selectedIndex == (int)i) {
+                                        selectedIndex = -1;
+                                    }
+                                    else if (selectedIndex > (int)i) {
+                                        selectedIndex--;
+                                    }
+                                    break;
+                                }
+                            }
                             g_pendingDeleteId = -1;
-                            ImGui::CloseCurrentPopup();
                         }
-                        ImGui::SameLine();
-                        if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
-                            g_pendingDeleteId = -1; ImGui::CloseCurrentPopup();
-                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SetItemDefaultFocus();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                        g_pendingDeleteId = -1;
+                        ImGui::CloseCurrentPopup();
                     }
                     ImGui::EndPopup();
                 }
 
-                if (g_openTerrainConfirmPopup) { ImGui::OpenPopup("Generate Terrain?"); g_openTerrainConfirmPopup = false; }
+                if (g_openTerrainConfirmPopup) {
+                    ImGui::OpenPopup("Generate Terrain?");
+                    g_openTerrainConfirmPopup = false;
+                }
 
-                if (ImGui::BeginPopupModal("Generate Terrain?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-                {
-                    ImGui::Text(myTriangle.IsTerrainCommitted()
-                        ? "Apply these changes to the terrain in the scene?"
-                        : "Apply this terrain to the viewport scene?");
-                    ImGui::Spacing();
-                    if (ImGui::Button("Yes", ImVec2(110.0f, 0.0f))) {
+                if (ImGui::BeginPopupModal("Generate Terrain?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::Text("Commit the current terrain preview to the scene?\n\n");
+                    ImGui::Separator();
+
+                    if (ImGui::Button("OK", ImVec2(120, 0))) {
                         myTriangle.CommitTerrain();
                         ImGui::CloseCurrentPopup();
                     }
+                    ImGui::SetItemDefaultFocus();
                     ImGui::SameLine();
-                    if (ImGui::Button("No", ImVec2(110.0f, 0.0f))) {
+                    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::EndPopup();
                 }
-
-                ImGui::End(); // Close PersistentMenu window
             }
-
+            ImGui::End();
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
         }
 
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-       
-        // 2b. VIEWPORT MANAGER (right-hand outliner)
-        // Lists every object living in the viewport with its unique ID, an
-        // editable name, a visibility (eye) toggle and a selection lock.
-        {
-            const float panelWidth = 340.0f;
-            ImGui::SetNextWindowPos(ImVec2((float)SCR_WIDTH - panelWidth, 0.0f), ImGuiCond_Always);
-            ImGui::SetNextWindowSize(
-                ImVec2(panelWidth, g_outlinerOpen ? (float)SCR_HEIGHT : 0.0f),
-                ImGuiCond_Always);
+        // --- 3. OUTLINER / VIEWPORT MANAGER PANEL (RIGHT-HAND SIDE) ---
+        if (g_outlinerOpen) {
+            ImGui::SetNextWindowPos(ImVec2((float)SCR_WIDTH - 300.0f, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(300.0f, (float)SCR_HEIGHT), ImGuiCond_Always);
 
-            ImGuiWindowFlags outlinerFlags =
-                ImGuiWindowFlags_NoMove
-                | ImGuiWindowFlags_NoResize
-                | ImGuiWindowFlags_NoTitleBar
-                | ImGuiWindowFlags_NoCollapse;
+            ImGuiWindowFlags outlinerFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
 
-            if (!g_outlinerOpen)
-                outlinerFlags |= ImGuiWindowFlags_AlwaysAutoResize;
+            if (ImGui::Begin("Viewport Manager", &g_outlinerOpen, outlinerFlags)) {
+                ImGui::TextDisabled("Scene Hierarchy (%d objects)", (int)objects.size());
+                ImGui::Separator();
 
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.09f, 0.92f));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+                if (ImGui::BeginChild("OutlinerList", ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing() * 8), true)) {
+                    for (int i = 0; i < (int)objects.size(); ++i) {
+                        ImGui::PushID(i);
 
-            if (ImGui::Begin("##ViewportManager", nullptr, outlinerFlags))
-            {
-                // ---- Header with the arrow drop-down ----
-                if (ImGui::ArrowButton("##OutlinerToggle", g_outlinerOpen ? ImGuiDir_Right : ImGuiDir_Down))
-                    g_outlinerOpen = !g_outlinerOpen;
+                        bool isSelected = (selectedIndex == i);
+                        bool isLocked = objects[i].locked;
 
-                ImGui::SameLine();
-                ImGui::Text("Viewport Manager");
-
-                if (g_outlinerOpen)
-                {
-                    ImGui::Separator();
-
-                    int lockedNow = FindLockedIndex(objects);
-                    if (lockedNow >= 0) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
-                            "LOCKED: %s (only this object is selectable)",
-                            objects[lockedNow].name.c_str());
-                        ImGui::Separator();
-                    }
-
-                    ImGui::TextDisabled("Select an item, then press F to focus it.");
-                    ImGui::Spacing();
-
-                    ImGui::BeginChild("##OutlinerList", ImVec2(0.0f, 0.0f), false);
-
-                    for (int i = 0; i < (int)objects.size(); i++)
-                    {
-                        GameObject& obj = objects[i];
-                        ImGui::PushID(obj.id);
-
-                        bool interactable = (lockedNow < 0) || (i == lockedNow);
-
-                        // ---- Eye icon: hide / unhide ----
-                        if (ImGui::SmallButton(obj.visible ? "O" : "-")) {
-                            obj.visible = !obj.visible;
-                        }
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip(obj.visible ? "Visible (click to hide)" : "Hidden (click to show)");
-
-                        // ---- Lock icon: restrict selection to this object ----
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton(obj.locked ? "[L]" : "[ ]")) {
-                            if (obj.locked) {
-                                obj.locked = false;
-                            }
-                            else {
-                                for (auto& other : objects) other.locked = false; // only one lock at a time
-                                obj.locked = true;
+                        // Lock indicator / toggle
+                        if (ImGui::Selectable(isLocked ? "[L]" : "[ ]", isLocked, 0, ImVec2(24.0f, 0.0f))) {
+                            // Clear other locks if enabling
+                            if (!isLocked) {
+                                for (auto& obj : objects) obj.locked = false;
+                                objects[i].locked = true;
                                 selectedIndex = i;
                             }
-                            lockedNow = FindLockedIndex(objects);
+                            else {
+                                objects[i].locked = false;
+                            }
                         }
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip(obj.locked
-                                ? "Selection locked to this object (click to unlock)"
-                                : "Lock selection to this object");
-
                         ImGui::SameLine();
-                        if (ImGui::SmallButton("Delete (X)")) {
-                            g_pendingDeleteId = obj.id;
-                            g_openDeletePopup = true;
-                        }
 
-                        // ---- Name row (double-click or the Rename button to edit) ----
-                        if (g_renamingIndex == i)
-                        {
-                            ImGui::SetNextItemWidth(180.0f);
-                            if (ImGui::InputText("##RenameField", g_renameBuffer, IM_ARRAYSIZE(g_renameBuffer),
-                                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
-                            {
-                                if (g_renameBuffer[0] != '\0')
-                                    obj.name = g_renameBuffer;
+                        // Visibility Toggle
+                        bool visible = objects[i].visible;
+                        if (ImGui::Checkbox("##vis", &visible)) {
+                            objects[i].visible = visible;
+                        }
+                        ImGui::SameLine();
+
+                        // Object Name / Selection / Inline Rename
+                        if (g_renamingIndex == i) {
+                            ImGui::SetNextItemWidth(120.0f);
+                            if (ImGui::InputText("##rename", g_renameBuffer, IM_ARRAYSIZE(g_renameBuffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                                objects[i].name = std::string(g_renameBuffer);
                                 g_renamingIndex = -1;
                             }
-
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("OK")) {
-                                if (g_renameBuffer[0] != '\0')
-                                    obj.name = g_renameBuffer;
+                            if (ImGui::IsItemDeactivated() && !ImGui::IsItemDeactivatedAfterEdit()) {
                                 g_renamingIndex = -1;
                             }
                         }
-                        else
-                        {
-                            char label[128];
-                            snprintf(label, sizeof(label), "#%d  %s  (%s)",
-                                obj.id, obj.name.c_str(), ToString(obj.type).c_str());
-
-                            bool isSelected = (selectedIndex == i);
-
-                            if (!interactable)
-                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.45f, 0.45f, 1.0f));
-                            else if (!obj.visible)
-                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-
-                            if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_AllowDoubleClick))
-                            {
-                                if (interactable) {
-                                    selectedIndex = i;
-                                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                                        g_renamingIndex = i;
-                                        SetBuffer(g_renameBuffer, sizeof(g_renameBuffer), obj.name);
-                                    }
+                        else {
+                            if (ImGui::Selectable(objects[i].name.c_str(), isSelected, ImGuiSelectableFlags_AllowDoubleClick)) {
+                                selectedIndex = i;
+                                if (ImGui::IsMouseDoubleClicked(0)) {
+                                    g_renamingIndex = i;
+                                    SetBuffer(g_renameBuffer, sizeof(g_renameBuffer), objects[i].name);
                                 }
                             }
-
-                            if (!interactable || !obj.visible)
-                                ImGui::PopStyleColor();
-                        }
-
-                        // ---- Per-item actions for the selected row ----
-                        if (selectedIndex == i && g_renamingIndex != i)
-                        {
-                            ImGui::Indent();
-                            if (ImGui::SmallButton("Focus (F)")) {
-                                g_focusRequest = true;
-                            }
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("Rename")) {
-                                g_renamingIndex = i;
-                                SetBuffer(g_renameBuffer, sizeof(g_renameBuffer), obj.name);
-                            }
-                            ImGui::TextDisabled("pos  %.2f, %.2f, %.2f",
-                                obj.position.x, obj.position.y, obj.position.z);
-                            ImGui::Unindent();
                         }
 
                         ImGui::PopID();
                     }
+                }
+                ImGui::EndChild();
 
-                    if (objects.empty())
-                        ImGui::TextDisabled("No objects in the viewport yet.");
+                ImGui::Separator();
 
-                    ImGui::EndChild();
+                // Selected Object Details & Transforms
+                if (selectedIndex >= 0 && selectedIndex < (int)objects.size()) {
+                    auto& selectedObj = objects[selectedIndex];
+
+                    ImGui::Text("Selected: %s", selectedObj.name.c_str());
+
+                    if (ImGui::Button("Focus (F)", ImVec2(120.0f, 0.0f))) {
+                        g_focusRequest = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Delete (X)", ImVec2(120.0f, 0.0f))) {
+                        g_pendingDeleteId = selectedObj.id;
+                        g_openDeletePopup = true;
+                    }
+
+                    ImGui::Spacing();
+
+                    bool transformChanged = false;
+                    transformChanged |= ImGui::DragFloat3("Position", glm::value_ptr(selectedObj.position), 0.1f);
+
+                    glm::vec3 rotDegrees = selectedObj.rotation;
+                    if (ImGui::DragFloat3("Rotation", glm::value_ptr(rotDegrees), 1.0f)) {
+                        selectedObj.rotation = rotDegrees;
+                        transformChanged = true;
+                    }
+
+                    transformChanged |= ImGui::DragFloat3("Scale", glm::value_ptr(selectedObj.scale), 0.05f, 0.01f, 100.0f);
+
+                    if (selectedObj.isBasicShape) {
+                        ImGui::ColorEdit3("Color", glm::value_ptr(selectedObj.baseColor));
+                    }
+
+                    if (transformChanged) {
+                        glm::mat4 t = glm::translate(glm::mat4(1.0f), selectedObj.position);
+                        glm::mat4 r = glm::rotate(glm::mat4(1.0f), glm::radians(selectedObj.rotation.x), glm::vec3(1, 0, 0));
+                        r = glm::rotate(r, glm::radians(selectedObj.rotation.y), glm::vec3(0, 1, 0));
+                        r = glm::rotate(r, glm::radians(selectedObj.rotation.z), glm::vec3(0, 0, 1));
+                        glm::mat4 s = glm::scale(glm::mat4(1.0f), selectedObj.scale);
+
+                        selectedObj.transformMatrix = t * r * s;
+                    }
+
+                    // Gizmo manipulation
+                    ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
+                    ImGuizmo::SetRect(0, 0, (float)SCR_WIDTH, (float)SCR_HEIGHT);
+
+                    glm::mat4 modelMatrix = selectedObj.transformMatrix;
+                    ImGuizmo::Manipulate(
+                        glm::value_ptr(view),
+                        glm::value_ptr(projection),
+                        currentOperation,
+                        ImGuizmo::LOCAL,
+                        glm::value_ptr(modelMatrix)
+                    );
+
+                    if (ImGuizmo::IsUsing()) {
+                        selectedObj.transformMatrix = modelMatrix;
+                        glm::vec3 skew;
+                        glm::vec4 perspective;
+                        glm::quat rotationQuat;
+                        glm::decompose(modelMatrix, selectedObj.scale, rotationQuat, selectedObj.position, skew, perspective);
+                        selectedObj.rotation = glm::degrees(glm::eulerAngles(rotationQuat));
+                    }
+                }
+                else {
+                    ImGui::TextDisabled("No object selected.");
                 }
             }
             ImGui::End();
-
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor();
         }
 
-        // 3. OVERLAY DIRECT VIEWPORT MANIPULATION GIZMO
-        if (selectedIndex >= 0 && selectedIndex < (int)objects.size() &&
-            objects[selectedIndex].visible &&
-            (lockedIndex < 0 || selectedIndex == lockedIndex)) {
-            auto& obj = objects[selectedIndex];
-
-            int currentWidth, currentHeight;
-            glfwGetWindowSize(window, &currentWidth, &currentHeight);
-
-            ImGuizmo::SetOrthographic(false);
-            ImGuizmo::SetRect(0, 0, (float)currentWidth, (float)currentHeight);
-
-            ImGuizmo::Manipulate(
-                glm::value_ptr(view),
-                glm::value_ptr(projection),
-                currentOperation,
-                ImGuizmo::LOCAL,
-                glm::value_ptr(obj.transformMatrix)
-            );
-
-            if (ImGuizmo::IsUsing()) {
-                float matrixTranslation[3], matrixRotation[3], matrixScale[3];
-                ImGuizmo::DecomposeMatrixToComponents(glm::value_ptr(obj.transformMatrix), matrixTranslation, matrixRotation, matrixScale);
-
-                obj.position = glm::vec3(matrixTranslation[0], matrixTranslation[1], matrixTranslation[2]);
-                obj.rotation = glm::vec3(matrixRotation[0], matrixRotation[1], matrixRotation[2]);
-                obj.scale = glm::vec3(matrixScale[0], matrixScale[1], matrixScale[2]);
-            }
-        }
-
+        // --- 4. RENDER IMGUI DRAW DATA ---
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -1096,9 +1189,14 @@ int main() {
         glfwPollEvents();
     }
 
+    // Cleanup resources
+    delete deferredSunShader;
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+
+    glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
-};
+}

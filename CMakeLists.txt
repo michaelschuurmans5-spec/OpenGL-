@@ -46,7 +46,7 @@ add_executable(${PROJECT_NAME}
     include/imgui/backends/ImGuizmo.cpp
 
     # Headers do NOT need to be listed here.
-)
+ include/GBuffer.h src/GBuffer.cpp)
 
 # =========================================================
 # IMGUI / IMGUIZMO
@@ -111,7 +111,7 @@ target_link_libraries(
 )
 
 # =========================================================
-# COPY ASSETS
+# COPY ASSETS (Includes Assets/Shaders, Models, Textures)
 # =========================================================
 
 add_custom_command(
@@ -122,5 +122,5 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/Assets"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Assets"
 
-    COMMENT "Copying assets folder to executable output directory..."
+    COMMENT "Copying Assets folder to output directory..."
 )

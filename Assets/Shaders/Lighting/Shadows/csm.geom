@@ -8,12 +8,12 @@ void main()
 {
     for (int cascade = 0; cascade < 4; ++cascade)
     {
-        gl_Layer = cascade; // Direct primitive to 2D Texture Array slice[cite: 12]
+        gl_Layer = cascade; // Direct primitive to 2D Texture Array slice
         for (int i = 0; i < 3; ++i)
         {
-            gl_Position = shadowMatrices[cascade] * gl_in[i].gl_Position;[cite: 12]
-            EmitVertex();[cite: 12]
+            gl_Position = shadowMatrices[cascade] * gl_in[i].gl_Position;
+            EmitVertex();
         }
-        EndPrimitive();[cite: 12]
+        EndPrimitive();
     }
 }
